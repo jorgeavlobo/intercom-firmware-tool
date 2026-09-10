@@ -111,12 +111,231 @@ fn reexec_self() {
     eprintln!("btmqttd: re-exec failed ({err}); exiting for watchdog respawn");
 }
 
+/// Maximum time the boot gate waits for the network + OWN gateway before proceeding anyway (#177).
+/// Matches go2rtcd's #166 gate cap (~5 min): long enough for WiFi association + DHCP on a cold boot,
+/// bounded so a genuinely offline unit still comes up and self-heals via the reconnect loops rather
+/// than blocking startup forever.
+const BOOT_GATE_CAP: Duration = Duration::from_secs(300);
+/// Poll cadence while the boot gate waits (the same 5 s slice go2rtcd's #166 gate uses).
+const BOOT_GATE_STEP: Duration = Duration::from_secs(5);
+/// Per-attempt TCP-connect timeout when probing the OWN gateway during the boot gate — short, since
+/// a listening `:20000` accepts on loopback near-instantly and a missing one should fail fast.
+const BOOT_GATE_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// The boot gate's decision: `Proceed` with startup, or `Shutdown` because a termination signal
+/// arrived while waiting (so `run` returns `Ok(false)` — an ordinary shutdown, no re-exec).
+enum BootReady {
+    Proceed,
+    Shutdown,
+}
+
+/// Is `ip` a routable source address — not unspecified / loopback / link-local — in either family?
+fn is_routable_source(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => !v4.is_unspecified() && !v4.is_loopback() && !v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            !v6.is_unspecified() && !v6.is_loopback() && !v6.is_unicast_link_local()
+        }
+    }
+}
+
+/// Bind a UDP socket in `dest`'s family and "connect" it to `dest` (no datagram is sent); the kernel
+/// selects the source address from the routing table. A routable ([`is_routable_source`]) source
+/// means a route to that family is up. SYNCHRONOUS — a couple of non-blocking syscalls.
+fn probe_route(dest: std::net::IpAddr) -> bool {
+    let bind: std::net::IpAddr = match dest {
+        std::net::IpAddr::V4(_) => std::net::Ipv4Addr::UNSPECIFIED.into(),
+        std::net::IpAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
+    };
+    let Ok(sock) = std::net::UdpSocket::bind((bind, 0)) else {
+        return false;
+    };
+    // Port is irrelevant (no datagram is sent); 9 is the discard protocol.
+    if sock.connect((dest, 9)).is_err() {
+        return false;
+    }
+    sock.local_addr().map(|a| a.ip()).is_ok_and(is_routable_source)
+}
+
+/// Does the device have a usable route toward the broker — i.e. `wlan0` has a lease and the reply
+/// path exists? When `mqtt_host` is an IP literal, probe its OWN family (covers an on-link broker
+/// with no default gateway, and an IPv6-only network). When it's a HOSTNAME — which can't be resolved
+/// here (see below) to learn its family — accept a default route in EITHER family, so a hostname
+/// broker on an IPv6-only device isn't judged unreachable by an IPv4-only probe (which would stall
+/// the gate to the cap on every boot). The sentinels are fixed off-link documentation addresses
+/// (RFC 5737 / RFC 3849), so a hit means a real default route exists.
+///
+/// SYNCHRONOUS and DNS-FREE on purpose: a hostname is NOT resolved here. An async resolve
+/// (`still::reachable_ipv4` → `lookup_host`) runs `getaddrinfo` on tokio's BLOCKING pool, where a
+/// dropped future can't cancel it and runtime teardown (`drop(rt)`) would WAIT for it — so a wedged
+/// resolver would defeat the boot gate's prompt-cancellation guarantee and could hang shutdown to
+/// systemd's kill timeout. The UDP-connect probe is a couple of non-blocking syscalls instead.
+fn has_route_to_broker(mqtt_host: &str) -> bool {
+    const V4_SENTINEL: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 1); // RFC 5737 TEST-NET-1
+    const V6_SENTINEL: std::net::Ipv6Addr =
+        std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1); // RFC 3849 documentation range
+    match mqtt_host.parse::<std::net::IpAddr>() {
+        Ok(ip) => probe_route(ip),
+        Err(_) => probe_route(V4_SENTINEL.into()) || probe_route(V6_SENTINEL.into()),
+    }
+}
+
+/// Is the OWN gateway accepting TCP connections on `host:port`? A bounded connect probe — it does
+/// NOT perform the OWN handshake, only checks that the local openwebnet daemon is listening on
+/// `:20000` — so btmqttd doesn't start dialing it (sender/av/dimension/volume) before it is up.
+///
+/// The probe is DNS-FREE (see [`has_route_to_broker`] for why the gate must never spawn a blocking
+/// resolve), so it only runs on a concrete `IP:port` — the shipped `127.0.0.1:20000`. We DON'T gate
+/// on an endpoint that can't be probed DNS-free — a HOSTNAME `OWN_HOST` (a supported but unusual
+/// remote-gateway config), or port 0 (a misconfig a connect could never satisfy): return `true` so
+/// the route condition gates the boot and `sender`/`av`'s reconnect loops handle the endpoint, rather
+/// than waiting out the full cap every boot. Unit-tested for the real-listener, closed-port, hostname
+/// and port-0 cases.
+async fn own_gateway_accepting(host: &str, port: u16) -> bool {
+    if port == 0 {
+        return true;
+    }
+    let Ok(ip) = host.parse::<std::net::IpAddr>() else {
+        return true;
+    };
+    matches!(
+        tokio::time::timeout(BOOT_GATE_PROBE_TIMEOUT, tokio::net::TcpStream::connect((ip, port)))
+            .await,
+        Ok(Ok(_))
+    )
+}
+
+/// Both boot-readiness conditions: a usable route toward the broker ([`has_route_to_broker`]) AND the
+/// OWN gateway accepting on `:20000` ([`own_gateway_accepting`]). Evaluated fresh on each poll;
+/// neither touches DNS, so the whole poll is promptly cancellable by the cap or a shutdown signal.
+async fn boot_ready(cfg: &Config) -> bool {
+    has_route_to_broker(&cfg.mqtt_host) && own_gateway_accepting(&cfg.own_host, cfg.own_port_mon).await
+}
+
+/// Boot gate (#177). btmqttd can start before the network is usable — before `wlan0` has a default
+/// route and before the local OWN gateway is listening on `:20000`. Starting the connect loops then
+/// floods the log with `Network unreachable` / `Connection refused` and pushes the first-run idle
+/// capture out non-deterministically. Wait — bounded — for both readiness conditions ([`boot_ready`])
+/// before proceeding, so startup is quiet and first-run timing is deterministic regardless of boot
+/// ordering. Mirrors the go2rtcd #166 gate.
+///
+/// Capped at [`BOOT_GATE_CAP`]: a genuinely offline unit still comes up and self-heals via the
+/// existing reconnect loops (sender/av/broker) instead of blocking here forever. A SIGTERM/SIGINT
+/// during the wait returns [`BootReady::Shutdown`] promptly so `systemctl stop` never hangs on the
+/// gate. Logs once when it begins waiting and once when it resolves — never per attempt.
+///
+/// Takes the caller's SIGTERM/SIGINT receivers — the SAME pair the main shutdown select reuses — not
+/// its own: creating a tokio `Signal` installs a process-wide handler that overrides the default
+/// terminate action, so a temporary pair dropped on return would leave a window where a stop is
+/// caught by that handler but lands on no receiver (lost, default action already suppressed).
+async fn wait_for_boot_ready(
+    cfg: &Config,
+    sig_term: &mut tokio::signal::unix::Signal,
+    sig_int: &mut tokio::signal::unix::Signal,
+) -> BootReady {
+    gate_on(poll_until_ready(cfg), BOOT_GATE_CAP, sig_term.recv(), sig_int.recv()).await
+}
+
+/// Race a readiness `poll` against the overall `cap` and the two shutdown signals, returning as soon
+/// as any resolves. Because `select!` CANCELS the losing branches, a `poll` still in flight (an
+/// in-flight `TcpStream::connect` in `own_gateway_accepting`) is dropped the instant the cap elapses
+/// or a signal arrives — so the cap is honored, and a SIGTERM/SIGINT is handled promptly, even while
+/// a probe is mid-flight. This cancellation is only truthful because the probes are DNS-free (see
+/// [`has_route_to_broker`]): a dropped async DNS resolve would keep running on the blocking pool and
+/// `drop(rt)` would wait it out. The `cap` timer starts on entry, before the first probe the `poll`
+/// runs, so that probe is bounded too. Takes the two shutdown signals as bare FUTURES (the caller
+/// passes `Signal::recv()`), so the guarantee is unit-testable with controllable `poll`/signal
+/// futures — without a test installing real, process-global signal handlers.
+async fn gate_on(
+    poll: impl std::future::Future<Output = BootReady>,
+    cap: Duration,
+    term: impl std::future::Future,
+    intr: impl std::future::Future,
+) -> BootReady {
+    tokio::select! {
+        // BIASED: poll the branches top-to-bottom so a ready signal ALWAYS wins over a
+        // simultaneously-ready `poll` (readiness) — an unbiased select could pick `Proceed` in the
+        // same scheduling window a stop signal arrived, missing the stop.
+        biased;
+        _ = term => BootReady::Shutdown,
+        _ = intr => BootReady::Shutdown,
+        outcome = poll => outcome,
+        _ = tokio::time::sleep(cap) => {
+            eprintln!(
+                "btmqttd: boot gate — not ready after {}s; starting anyway (reconnect loops self-heal)",
+                cap.as_secs()
+            );
+            BootReady::Proceed
+        }
+    }
+}
+
+/// Poll [`boot_ready`] every [`BOOT_GATE_STEP`] until both conditions hold, then return
+/// [`BootReady::Proceed`]. Runs UNBOUNDED — [`wait_for_boot_ready`] races it against the overall cap
+/// and the signals, which cancel it (dropping any in-flight probe). Logs a single "waiting" line the
+/// first time it finds the system not ready and a single "up; starting" line when it becomes ready
+/// after having waited; a clean reboot that is ready on the first probe stays silent.
+async fn poll_until_ready(cfg: &Config) -> BootReady {
+    // The gateway is only pre-checked for a concrete IP:port (see `own_gateway_accepting`); for a
+    // hostname or port-0 endpoint the gate waits on the route ALONE, so the log must reflect that
+    // rather than claim it is waiting on / confirming the gateway it never probes.
+    let gateway_probed = cfg.own_host.parse::<std::net::IpAddr>().is_ok() && cfg.own_port_mon != 0;
+    let waiting_for = if gateway_probed {
+        // Bracket an IPv6 literal so the `host:port` isn't ambiguous against its own colons.
+        let host = if cfg.own_host.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{}]", cfg.own_host)
+        } else {
+            cfg.own_host.clone()
+        };
+        format!("a network route and the OWN gateway {host}:{}", cfg.own_port_mon)
+    } else {
+        "a network route".to_string()
+    };
+    let ready_msg = if gateway_probed {
+        "network route and OWN gateway up; starting"
+    } else {
+        "network route up; starting"
+    };
+    let mut waited = false;
+    loop {
+        if boot_ready(cfg).await {
+            if waited {
+                eprintln!("btmqttd: boot gate — {ready_msg}");
+            }
+            return BootReady::Proceed;
+        }
+        if !waited {
+            eprintln!("btmqttd: boot gate — waiting up to {}s for {waiting_for}", BOOT_GATE_CAP.as_secs());
+            waited = true;
+        }
+        tokio::time::sleep(BOOT_GATE_STEP).await;
+    }
+}
+
 /// Returns `Ok(true)` when the caller should RE-EXEC the daemon immediately (a WHERE was just
 /// learned), or `Ok(false)` for an ordinary signal-driven shutdown.
 async fn run() -> Result<bool, String> {
     let cfg = Arc::new(Config::load()?);
     if cfg.mqtt_host.is_empty() {
         return Err("MQTT_HOST is not set in the config".into());
+    }
+    // Build (and thereby VALIDATE) the TLS config BEFORE the boot gate, so a misconfigured
+    // CA/cert/key path fails fast at startup instead of surfacing only after the gate's up-to-cap
+    // wait on a network-down boot. Consumed into the transport once MqttOptions is built, below.
+    let tls = if cfg.uses_tls() { Some(build_tls(&cfg)?) } else { None };
+    // SIGTERM/SIGINT receivers, installed HERE and reused by BOTH the boot gate below and the main
+    // shutdown select. A single continuous pair (never a temporary one dropped and re-created) closes
+    // the window where tokio's installed handler suppresses the default terminate action but no
+    // receiver exists to catch a stop — which would otherwise be lost, hanging shutdown to systemd's
+    // kill timeout.
+    let mut sig_term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
+    let mut sig_int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    // Boot gate (#177): wait — bounded — for the network route and the OWN gateway before spawning
+    // the connect loops, so a boot-before-network race can't flood the log with unreachable/refused
+    // churn and push out the first-run idle capture. A shutdown signal during the wait exits cleanly.
+    match wait_for_boot_ready(&cfg, &mut sig_term, &mut sig_int).await {
+        BootReady::Proceed => {}
+        BootReady::Shutdown => return Ok(false),
     }
     // Service activation time (UTC ISO-8601), captured once and republished retained
     // on every connect. Arc<str> so each spawned birth task gets a cheap clone.
@@ -153,8 +372,8 @@ async fn run() -> Result<bool, String> {
         QoS::AtMostOnce,
         true,
     ));
-    if cfg.uses_tls() {
-        opts.set_transport(Transport::tls_with_config(build_tls(&cfg)?));
+    if let Some(tls) = tls {
+        opts.set_transport(Transport::tls_with_config(tls));
     }
 
     let (client, mut eventloop) = AsyncClient::new(opts, 32);
@@ -652,8 +871,8 @@ async fn run() -> Result<bool, String> {
     let mut subscribe_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut announce_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    let mut sig_term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
-    let mut sig_int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    // sig_term / sig_int were installed before the boot gate and are reused here — see the note at
+    // their creation for why the pair is continuous rather than re-created.
 
     eprintln!(
         "btmqttd: starting (broker {}:{}, client-id {})",
@@ -1731,5 +1950,78 @@ mod tests {
         assert!(!camera_mdns_active(&cfg(&[("MQTT_HOST", "h"), ("CAMERA_ENABLED", "1")])));
         // Default (camera off) → inactive.
         assert!(!camera_mdns_active(&cfg(&[("MQTT_HOST", "h")])));
+    }
+
+    #[test]
+    fn own_gateway_accepting_detects_a_listener_and_a_closed_port() {
+        // The boot gate's OWN-gateway readiness probe (#177): a real loopback listener reads as up;
+        // a freed port with nothing listening reads as down (refused, not a timeout). Driven on an
+        // explicit current-thread runtime (the still.rs convention for async network-helper tests).
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            // A bound listener → connect succeeds (the kernel completes the handshake from the
+            // backlog even without an accept), so the probe reports the gateway UP.
+            let listener =
+                tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            assert!(own_gateway_accepting("127.0.0.1", port).await);
+            // Free the port, then probe it: nothing listens → connection refused (RST), so the
+            // probe reports the gateway DOWN — the state the gate waits out at boot.
+            drop(listener);
+            assert!(!own_gateway_accepting("127.0.0.1", port).await);
+            // A non-IP host (a supported but unusual hostname OWN_HOST) can't be probed DNS-free, so
+            // it passes through as "ready" rather than making the gate wait out the cap every boot.
+            assert!(own_gateway_accepting("openserver.local", port).await);
+            // Port 0 (a misconfig a connect could never satisfy) also passes through, not gated.
+            assert!(own_gateway_accepting("127.0.0.1", 0).await);
+        });
+    }
+
+    #[test]
+    fn has_route_to_broker_rejects_a_loopback_only_route() {
+        // A loopback broker yields a loopback SOURCE address — not a real network route — so the gate
+        // keeps waiting rather than treating loopback-only as "network up". This is the DNS-free route
+        // probe; a literal IP is used verbatim, so the assertion is deterministic. (Mirrors still.rs.)
+        // Both families: the v6 literal exercises the family-aware bind/probe path.
+        assert!(!has_route_to_broker("127.0.0.1"));
+        assert!(!has_route_to_broker("::1"));
+    }
+
+    #[test]
+    fn is_routable_source_classifies_both_families() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        // Loopback / unspecified / link-local are NOT a real route — in either family. (The v6
+        // link-local case is the one the route probe must reject on an IPv6-only device.)
+        for ip in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 1, 2)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+        ] {
+            assert!(!is_routable_source(ip), "{ip} should not be routable");
+        }
+        // A normal LAN / global address in either family IS routable.
+        assert!(is_routable_source(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
+        assert!(is_routable_source(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 50))));
+    }
+
+    #[tokio::test]
+    async fn boot_gate_honors_the_cap_when_a_probe_never_completes() {
+        // The crux of the gate (#177 / #188 review): the cap must win even if a readiness probe
+        // stalls indefinitely (e.g. a stuck DNS resolve), and the still-pending probe must be
+        // dropped — never awaited past the cap. `std::future::pending` models a probe that never
+        // resolves; `gate_on` races it against the cap, and `select!` cancels it when the cap fires.
+        // A short cap keeps the test fast. The signals are `pending()` futures too — so this test
+        // installs NO real, process-global signal handler (only the cap should fire).
+        let outcome = gate_on(
+            std::future::pending::<BootReady>(),
+            Duration::from_millis(50),
+            std::future::pending::<()>(),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(matches!(outcome, BootReady::Proceed));
     }
 }

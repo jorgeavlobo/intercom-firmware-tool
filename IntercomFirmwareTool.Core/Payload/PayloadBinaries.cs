@@ -72,8 +72,8 @@ namespace IntercomFirmwareTool.Core
         public static readonly ArmBinary Btmqttd = new(
             Name: "btmqttd",
             InstallPath: "/usr/sbin/btmqttd",
-            Length: 1_777_536,
-            Sha256Hex: "8a9c6f6a0ee362964cc29cfd1b4384f88342ab6f20c124b7e81155e9d8825866",
+            Length: 1_784_592,
+            Sha256Hex: "60869c9f9384a008cbd1fc6520ec93f0fde6cf9c6a6dad6f9853e135b79dd75b",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.btmqttd",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.licenses.btmqttd-THIRD-PARTY-LICENSES.txt",
