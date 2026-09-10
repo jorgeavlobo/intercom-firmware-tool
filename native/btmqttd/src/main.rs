@@ -213,16 +213,17 @@ async fn boot_ready(cfg: &Config) -> bool {
 /// existing reconnect loops (sender/av/broker) instead of blocking here forever. A SIGTERM/SIGINT
 /// during the wait returns [`BootReady::Shutdown`] promptly so `systemctl stop` never hangs on the
 /// gate. Logs once when it begins waiting and once when it resolves — never per attempt.
-async fn wait_for_boot_ready(cfg: &Config) -> BootReady {
-    // The run()-level signal streams aren't created until later; multiple tokio Signal streams for
-    // the same signal each receive it, so a temporary pair here is safe. If handlers can't be
-    // installed, don't block boot — just proceed.
-    let (mut sig_term, mut sig_int) =
-        match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
-            (Ok(t), Ok(i)) => (t, i),
-            _ => return BootReady::Proceed,
-        };
-    gate_on(poll_until_ready(cfg), BOOT_GATE_CAP, &mut sig_term, &mut sig_int).await
+///
+/// Takes the caller's SIGTERM/SIGINT receivers — the SAME pair the main shutdown select reuses — not
+/// its own: creating a tokio `Signal` installs a process-wide handler that overrides the default
+/// terminate action, so a temporary pair dropped on return would leave a window where a stop is
+/// caught by that handler but lands on no receiver (lost, default action already suppressed).
+async fn wait_for_boot_ready(
+    cfg: &Config,
+    sig_term: &mut tokio::signal::unix::Signal,
+    sig_int: &mut tokio::signal::unix::Signal,
+) -> BootReady {
+    gate_on(poll_until_ready(cfg), BOOT_GATE_CAP, sig_term, sig_int).await
 }
 
 /// Race a readiness `poll` against the overall `cap` and the two shutdown signals, returning as soon
@@ -292,10 +293,17 @@ async fn run() -> Result<bool, String> {
     if cfg.mqtt_host.is_empty() {
         return Err("MQTT_HOST is not set in the config".into());
     }
+    // SIGTERM/SIGINT receivers, installed HERE and reused by BOTH the boot gate below and the main
+    // shutdown select. A single continuous pair (never a temporary one dropped and re-created) closes
+    // the window where tokio's installed handler suppresses the default terminate action but no
+    // receiver exists to catch a stop — which would otherwise be lost, hanging shutdown to systemd's
+    // kill timeout.
+    let mut sig_term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
+    let mut sig_int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
     // Boot gate (#177): wait — bounded — for the network route and the OWN gateway before spawning
     // the connect loops, so a boot-before-network race can't flood the log with unreachable/refused
     // churn and push out the first-run idle capture. A shutdown signal during the wait exits cleanly.
-    match wait_for_boot_ready(&cfg).await {
+    match wait_for_boot_ready(&cfg, &mut sig_term, &mut sig_int).await {
         BootReady::Proceed => {}
         BootReady::Shutdown => return Ok(false),
     }
@@ -833,8 +841,8 @@ async fn run() -> Result<bool, String> {
     let mut subscribe_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut announce_task: Option<tokio::task::JoinHandle<()>> = None;
 
-    let mut sig_term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
-    let mut sig_int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
+    // sig_term / sig_int were installed before the boot gate and are reused here — see the note at
+    // their creation for why the pair is continuous rather than re-created.
 
     eprintln!(
         "btmqttd: starting (broker {}:{}, client-id {})",
