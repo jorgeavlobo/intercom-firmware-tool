@@ -706,10 +706,15 @@ async fn run() -> Result<bool, String> {
             (None, stopping, None, None)
         }
     };
-    // First-run idle auto-capture (issue #169): on the first boot where no idle.jpg exists yet, grab the
-    // real empty-doorway view so Home Assistant's thumbnail is a genuine still from the start (not the
-    // baked placeholder). One-shot BY CONSTRUCTION — it captures only while idle.jpg is ABSENT, so once a
-    // capture lands (here, or via the HA "update idle snapshot" button) it never re-runs; a boot where the
+    // First-run idle auto-capture (issue #169, version-aware per #176): grab the real empty-doorway view
+    // so Home Assistant's thumbnail is a genuine still (not the baked placeholder). Self-limiting BY
+    // CONSTRUCTION — it captures only while a VALID idle.jpg for THIS daemon version is not already present
+    // (`idle_snapshot_is_current`): a missing, corrupt, or oversized image, OR one whose `idle.version`
+    // stamp is absent/older (a pre-#176 image, or one captured by an EARLIER firmware — cfg/extra survives
+    // a reflash, issue #176) all trigger a capture. So a same-version reboot with a valid thumbnail SKIPS
+    // (no behavior change), a fresh capture (here, or via the HA "update idle snapshot" button) re-stamps
+    // and stops it re-running, and a firmware UPGRADE re-runs it EXACTLY ONCE to refresh the now-stale
+    // thumbnail; a boot where the
     // grab fails simply retries next boot (self-healing, no marker file). Waking an IDLE panel to
     // photograph it needs the on-demand SIP UA, so this is gated on a live `view_tx` (present only with
     // CAMERA_ONDEMAND_ENABLED) as well as on-device mode. Fully detached and best-effort — bounded by the
