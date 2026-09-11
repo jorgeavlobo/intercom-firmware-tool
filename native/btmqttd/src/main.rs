@@ -323,6 +323,12 @@ fn idle_snapshot_is_current() -> bool {
         && persist::read_idle_version().as_deref() == Some(update::INSTALLED_VERSION)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
+fn idle_snapshot_is_current_in(dir: &std::path::Path) -> bool {
+    persist::read_idle_jpg_in(dir).is_some_and(|b| still::is_jpeg(&b))
+        && persist::read_idle_version_in(dir).as_deref() == Some(update::INSTALLED_VERSION)
+}
+
 /// Returns `Ok(true)` when the caller should RE-EXEC the daemon immediately (a WHERE was just
 /// learned), or `Ok(false)` for an ordinary signal-driven shutdown.
 async fn run() -> Result<bool, String> {
@@ -758,7 +764,7 @@ async fn run() -> Result<bool, String> {
                 {
                     return;
                 }
-                eprintln!("btmqttd: capture: first-run idle snapshot (none present yet)");
+                eprintln!("btmqttd: capture: first-run idle snapshot refresh (missing, invalid, or stale)");
                 let _ = capture::capture_idle(&cfg_fr, Some(&view_tx)).await;
             });
         }
@@ -1864,6 +1870,7 @@ mod tests {
     use super::*;
     use rumqttc::{Publish, QoS};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn purge_predicate_matches_only_momentary_publishes() {
@@ -1946,6 +1953,42 @@ mod tests {
         );
         assert!(off_device_only.camera_enabled && !off_device_only.camera_ondevice);
         assert!(!is_momentary_publish(&pub_to(&off_device_only.topic_ring_snapshot), &off_device_only));
+    }
+
+    #[test]
+    fn idle_snapshot_current_requires_both_valid_jpeg_and_matching_version() {
+        static NONCE: AtomicU32 = AtomicU32::new(1);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-idle-current-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let idle_jpg = dir.join("idle.jpg");
+        let idle_version = dir.join("idle.version");
+        let jpeg: &[u8] = &[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01,
+            0x11, 0x00, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0x00,
+            0xFF, 0xD9,
+        ];
+
+        std::fs::write(&idle_jpg, jpeg).unwrap();
+        assert!(
+            !idle_snapshot_is_current_in(&dir),
+            "a valid JPEG without a version stamp must refresh once"
+        );
+
+        std::fs::write(&idle_version, "0.0.0\n").unwrap();
+        assert!(
+            !idle_snapshot_is_current_in(&dir),
+            "a valid JPEG with a mismatched version stamp must refresh once"
+        );
+
+        std::fs::write(&idle_version, format!(" {}\n", update::INSTALLED_VERSION)).unwrap();
+        assert!(
+            idle_snapshot_is_current_in(&dir),
+            "a valid JPEG with the installed version stamp may skip the first-run refresh"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -355,7 +355,7 @@ fn idle_version_file_in(dir: &Path) -> PathBuf {
     dir.join(IDLE_VERSION_FILE)
 }
 
-fn read_idle_version_in(dir: &Path) -> Option<String> {
+pub(crate) fn read_idle_version_in(dir: &Path) -> Option<String> {
     let s = std::fs::read_to_string(idle_version_file_in(dir)).ok()?;
     let t = s.trim();
     (!t.is_empty()).then(|| t.to_string())
@@ -365,7 +365,7 @@ fn store_idle_version_in(dir: &Path, version: &str) -> bool {
     atomic_write_in(dir, &idle_version_file_in(dir), format!("{version}\n").as_bytes())
 }
 
-fn read_idle_jpg_in(dir: &Path) -> Option<Vec<u8>> {
+pub(crate) fn read_idle_jpg_in(dir: &Path) -> Option<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(idle_jpg_file_in(dir)).ok()?;
     // Read at most the cap PLUS ONE byte, so a file exactly at the cap is kept while anything larger is
