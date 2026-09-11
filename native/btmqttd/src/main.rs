@@ -312,6 +312,23 @@ async fn poll_until_ready(cfg: &Config) -> BootReady {
     }
 }
 
+/// Whether the persisted idle thumbnail is BOTH a structurally valid JPEG AND was captured by THIS
+/// daemon version — the condition under which the first-run auto-capture skips (issue #176). A stored
+/// idle.jpg survives a firmware reflash (it lives on cfg/extra), so presence + validity alone is not
+/// enough: an image from a prior version must be refreshed once. Returns `false` (⇒ re-capture) when the
+/// idle.jpg is absent/corrupt/oversized OR its version stamp is absent/mismatched (an absent stamp is the
+/// pre-#176 image, treated as a mismatch). Blocking `std::fs`; call via `spawn_blocking`.
+fn idle_snapshot_is_current() -> bool {
+    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
+        && persist::read_idle_version().as_deref() == Some(update::INSTALLED_VERSION)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn idle_snapshot_is_current_in(dir: &std::path::Path) -> bool {
+    persist::read_idle_jpg_in(dir).is_some_and(|b| still::is_jpeg(&b))
+        && persist::read_idle_version_in(dir).as_deref() == Some(update::INSTALLED_VERSION)
+}
+
 /// Returns `Ok(true)` when the caller should RE-EXEC the daemon immediately (a WHERE was just
 /// learned), or `Ok(false)` for an ordinary signal-driven shutdown.
 async fn run() -> Result<bool, String> {
@@ -689,10 +706,15 @@ async fn run() -> Result<bool, String> {
             (None, stopping, None, None)
         }
     };
-    // First-run idle auto-capture (issue #169): on the first boot where no idle.jpg exists yet, grab the
-    // real empty-doorway view so Home Assistant's thumbnail is a genuine still from the start (not the
-    // baked placeholder). One-shot BY CONSTRUCTION — it captures only while idle.jpg is ABSENT, so once a
-    // capture lands (here, or via the HA "update idle snapshot" button) it never re-runs; a boot where the
+    // First-run idle auto-capture (issue #169, version-aware per #176): grab the real empty-doorway view
+    // so Home Assistant's thumbnail is a genuine still (not the baked placeholder). Self-limiting BY
+    // CONSTRUCTION — it captures only while a VALID idle.jpg for THIS daemon version is not already present
+    // (`idle_snapshot_is_current`): a missing, corrupt, or oversized image, OR one whose `idle.version`
+    // stamp is absent/older (a pre-#176 image, or one captured by an EARLIER firmware — cfg/extra survives
+    // a reflash, issue #176) all trigger a capture. So a same-version reboot with a valid thumbnail SKIPS
+    // (no behavior change), a fresh capture (here, or via the HA "update idle snapshot" button) re-stamps
+    // and stops it re-running, and a firmware UPGRADE re-runs it EXACTLY ONCE to refresh the now-stale
+    // thumbnail; a boot where the
     // grab fails simply retries next boot (self-healing, no marker file). Waking an IDLE panel to
     // photograph it needs the on-demand SIP UA, so this is gated on a live `view_tx` (present only with
     // CAMERA_ONDEMAND_ENABLED) as well as on-device mode. Fully detached and best-effort — bounded by the
@@ -713,36 +735,41 @@ async fn run() -> Result<bool, String> {
         if let Some(view_tx) = view_tx.clone() {
             let cfg_fr = cfg.clone();
             tokio::spawn(async move {
-                // Nothing to do if a VALID idle image already exists. Validate the JPEG (same check the
-                // still endpoint serves by), NOT just presence: a corrupt/non-JPEG idle.jpg must NOT
-                // permanently suppress the self-healing first-run capture while the endpoint falls back
-                // to the placeholder. Checked off the single-threaded runtime.
-                if tokio::task::spawn_blocking(|| {
-                    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
-                })
-                .await
-                // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid idle
-                // image exists" — that would permanently skip the self-healing first-run capture for this
-                // boot. Default to false so a transient failure falls through to a capture attempt.
-                .unwrap_or(false)
+                // Nothing to do if a VALID, CURRENT-VERSION idle image already exists. Two conditions,
+                // both required to skip (issue #176):
+                //   * the stored idle.jpg is a structurally valid JPEG (same check the still endpoint
+                //     serves by), NOT merely present — a corrupt/non-JPEG idle.jpg must NOT permanently
+                //     suppress the self-healing first-run capture while the endpoint falls back to the
+                //     placeholder; and
+                //   * its version stamp equals this daemon's INSTALLED_VERSION. cfg/extra survives a
+                //     firmware reflash, so a valid idle.jpg from a PRIOR version would otherwise be kept
+                //     forever; a mismatch (or an absent/corrupt stamp — e.g. a pre-#176 image) means the
+                //     firmware changed, so re-capture EXACTLY ONCE and re-stamp (capture_idle stamps on a
+                //     successful store). A same-version reboot matches → skip → no behavior change.
+                // Checked off the single-threaded runtime.
+                if tokio::task::spawn_blocking(idle_snapshot_is_current).await
+                    // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid,
+                    // current idle image exists" — that would permanently skip the self-healing first-run
+                    // capture for this boot. Default to false so a transient failure falls through to a
+                    // capture attempt.
+                    .unwrap_or(false)
                 {
                     return;
                 }
                 // Let go2rtc, the firewall and the SIP UA settle before waking the panel on a fresh boot.
                 tokio::time::sleep(capture::FIRST_RUN_DELAY).await;
-                // Re-check after the delay: a button press could have produced one meanwhile.
-                if tokio::task::spawn_blocking(|| {
-                    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
-                })
-                .await
-                // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid idle
-                // image exists" — that would permanently skip the self-healing first-run capture for this
-                // boot. Default to false so a transient failure falls through to a capture attempt.
-                .unwrap_or(false)
+                // Re-check after the delay: a button press (which also re-stamps) could have produced a
+                // current one meanwhile.
+                if tokio::task::spawn_blocking(idle_snapshot_is_current).await
+                    // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid,
+                    // current idle image exists" — that would permanently skip the self-healing first-run
+                    // capture for this boot. Default to false so a transient failure falls through to a
+                    // capture attempt.
+                    .unwrap_or(false)
                 {
                     return;
                 }
-                eprintln!("btmqttd: capture: first-run idle snapshot (none present yet)");
+                eprintln!("btmqttd: capture: first-run idle snapshot refresh (missing, invalid, or stale)");
                 let _ = capture::capture_idle(&cfg_fr, Some(&view_tx)).await;
             });
         }
@@ -1848,6 +1875,7 @@ mod tests {
     use super::*;
     use rumqttc::{Publish, QoS};
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn purge_predicate_matches_only_momentary_publishes() {
@@ -1930,6 +1958,42 @@ mod tests {
         );
         assert!(off_device_only.camera_enabled && !off_device_only.camera_ondevice);
         assert!(!is_momentary_publish(&pub_to(&off_device_only.topic_ring_snapshot), &off_device_only));
+    }
+
+    #[test]
+    fn idle_snapshot_current_requires_both_valid_jpeg_and_matching_version() {
+        static NONCE: AtomicU32 = AtomicU32::new(1);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-idle-current-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let idle_jpg = dir.join("idle.jpg");
+        let idle_version = dir.join("idle.version");
+        let jpeg: &[u8] = &[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01,
+            0x11, 0x00, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0x00,
+            0xFF, 0xD9,
+        ];
+
+        std::fs::write(&idle_jpg, jpeg).unwrap();
+        assert!(
+            !idle_snapshot_is_current_in(&dir),
+            "a valid JPEG without a version stamp must refresh once"
+        );
+
+        std::fs::write(&idle_version, "0.0.0\n").unwrap();
+        assert!(
+            !idle_snapshot_is_current_in(&dir),
+            "a valid JPEG with a mismatched version stamp must refresh once"
+        );
+
+        std::fs::write(&idle_version, format!(" {}\n", update::INSTALLED_VERSION)).unwrap();
+        assert!(
+            idle_snapshot_is_current_in(&dir),
+            "a valid JPEG with the installed version stamp may skip the first-run refresh"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
