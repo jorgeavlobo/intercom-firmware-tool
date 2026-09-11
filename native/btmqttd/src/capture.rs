@@ -730,7 +730,7 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // LAST_RING_MS is only ever advanced, so re-reading this is monotonic. It is checked THREE times: as an
     // EARLY fast path (below, BEFORE waking the panel or the ~25 s grab — so an already-known ring costs
     // neither a panel wake nor an ffmpeg run on the constrained device), AGAIN after the grab, and finally
-    // as the commit gate inside store_idle_jpg (a ring landing DURING the blocking write vetoes the rename
+    // as the commit gate inside store_idle_capture (a ring landing DURING the blocking write vetoes the rename
     // instead of replacing idle.jpg — which survives reboots + reflashes — with a visitor frame).
     let ring_recent = move || {
         let last_ring = LAST_RING_MS.load(Ordering::Relaxed);
@@ -856,34 +856,26 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
             );
             break 'capture false;
         }
-        // The atomic store is blocking std::fs — offload it off the single-threaded runtime. The commit gate
-        // takes RING_COMMIT_LOCK, re-checks `ring_recent()`, and (if clear) returns the guard so it is HELD
-        // across the rename. note_ring() takes the SAME lock before advancing LAST_RING_MS, so a ring arriving
-        // during the write is serialized: either it lands before the check (→ gate returns None, temp
-        // discarded, prior thumbnail intact) or strictly after the rename (→ the doorway was still empty when
-        // this frame committed). The MutexGuard lives and dies inside this one blocking task (never crosses a
-        // thread), so the closure stays `Send`.
-        let stored = tokio::task::spawn_blocking(move || {
-            crate::persist::store_idle_jpg(&bytes, move || {
+        // Store the frame AND, only if that commit lands, stamp the capturing version (issue #176) — as one
+        // blocking unit via store_idle_capture, so the "stamp only after a successful store" wiring is
+        // covered by a persist-level test (a regression dropping or misplacing the stamp fails there). The
+        // commit gate still takes RING_COMMIT_LOCK, re-checks `ring_recent()`, and (if clear) holds the guard
+        // across the rename; note_ring() takes the SAME lock, so a ring during the write either lands before
+        // the check (→ vetoed, thumbnail intact) or strictly after the rename (→ the doorway was empty at
+        // commit). The stamp lets the first-run gate tell a same-version reboot (skip) from the first boot of
+        // a NEW firmware (the cfg/extra idle.jpg survives a reflash → re-capture once). Best-effort stamp: a
+        // write failure reads as a mismatch next boot and self-heals with one extra capture — never a wrong
+        // thumbnail. The MutexGuard lives and dies inside this one blocking task, so the closure stays `Send`.
+        let (stored, stamped) = tokio::task::spawn_blocking(move || {
+            crate::persist::store_idle_capture(&bytes, crate::update::INSTALLED_VERSION, move || {
                 let guard = RING_COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
                 if ring_recent() { None } else { Some(guard) }
             })
         })
         .await
-        .unwrap_or(false);
+        .unwrap_or((false, false));
         if stored {
             eprintln!("btmqttd: capture: idle snapshot updated");
-            // Stamp the version that captured this idle.jpg (issue #176), so the first-run gate can tell a
-            // same-version reboot (skip — keep the thumbnail) from the first boot of a NEW firmware (the
-            // cfg/extra idle.jpg survives a reflash, so re-capture exactly once). Written AFTER a successful
-            // store on BOTH the first-run and the HA-button paths, so the stamp always tracks the bytes now
-            // on disk. Best-effort: a write failure just leaves a stale/absent stamp, which reads as a
-            // mismatch next boot and self-heals with one extra capture — never a wrong thumbnail.
-            let stamped = tokio::task::spawn_blocking(|| {
-                crate::persist::store_idle_version(crate::update::INSTALLED_VERSION)
-            })
-            .await
-            .unwrap_or(false);
             if !stamped {
                 eprintln!(
                     "btmqttd: capture: could not persist the idle-snapshot version stamp; \

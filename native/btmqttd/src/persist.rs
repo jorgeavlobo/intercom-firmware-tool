@@ -305,28 +305,52 @@ pub fn read_idle_jpg() -> Option<Vec<u8>> {
     read_idle_jpg_in(&state_dir())
 }
 
-/// Persist the captured idle-snapshot JPEG (issue #169): the first-run auto-capture and the HA
-/// "Update idle snapshot" button write the real empty-doorway view here so the Phase-1 still endpoint
-/// serves it on the next poll (no restart). Atomic write + dir fsync like every other record, so a
-/// reboot mid-write never leaves a torn image — and, living on the reboot- and reflash-persistent
-/// `cfg/extra` partition, the captured thumbnail survives both. NOT keyed: the newest capture is always
-/// the wanted one. The caller has already validated the bytes are a real JPEG.
+/// Persist a captured idle snapshot (issue #169) AND, only when that store commits, stamp the version that
+/// captured it (issue #176) — as ONE unit, so the two can't drift. The first-run auto-capture and the HA
+/// "Update idle snapshot" button both go through here. Returns `(stored, stamped)`:
+///   * `stored` — whether `idle.jpg` was (re)written and made durable. `true` only when the rename
+///     committed AND the parent-dir fsync succeeded; a post-rename fsync failure returns `false` even
+///     though `idle.jpg` may already have been replaced in the (not-yet-durable) directory, so treat
+///     `false` as "not reliably stored", not "unchanged". This is the value the caller reports as
+///     "snapshot updated".
+///   * `stamped` — whether the `idle.version` sidecar was then written. Best-effort: a `false` self-heals
+///     (the next boot reads a mismatch and re-captures once), so it never fails the store.
+///
+/// The version stamp is written ONLY on a successful store, so a vetoed or failed capture leaves BOTH
+/// `idle.jpg` and `idle.version` untouched — a failed capture can never mark an OLD thumbnail as current
+/// (issue #176). The image write, its fsync, and the stamp all share one blocking step and the same state
+/// dir, so the sidecar tracks the bytes actually on disk. Both live on the reboot- and reflash-persistent
+/// `cfg/extra` partition. NOT keyed: the newest capture is always the wanted one. The caller has already
+/// validated the bytes are a real JPEG.
 ///
 /// `commit_ok` is a COMMIT GATE evaluated at the LAST moment — after the temp file is written, in the
 /// same blocking step, immediately before the atomic rename that makes it the new `idle.jpg`. `None`
-/// discards the temp and leaves the existing `idle.jpg` UNTOUCHED; `Some(guard)` proceeds and the guard is
-/// held ACROSS the rename (see [`atomic_write_gated_in`]). `capture_idle` returns a shared mutex guard
-/// there and takes the same mutex in `note_ring()`, so the final ring check and the rename are one
-/// critical section against ring detection on the runtime thread — a ring detected DURING the (blocking)
-/// write can neither slip between the check and the rename nor get a visitor frame persisted as the
-/// empty-doorway thumbnail. Returns `true` only when the rename committed AND the parent-dir fsync that
-/// makes it durable succeeded; a post-rename fsync failure returns `false` even though `idle.jpg` may
-/// already have been replaced in the (not-yet-durable) directory — treat `false` as "not reliably stored",
-/// not as "unchanged". Blocking; call via `spawn_blocking`.
+/// discards the temp and leaves the existing `idle.jpg` UNTOUCHED (and skips the stamp); `Some(guard)`
+/// proceeds and the guard is held ACROSS the rename (see [`atomic_write_gated_in`]). `capture_idle` returns
+/// a shared mutex guard there and takes the same mutex in `note_ring()`, so the final ring check and the
+/// rename are one critical section against ring detection on the runtime thread — a ring detected DURING
+/// the (blocking) write can neither slip between the check and the rename nor get a visitor frame persisted
+/// as the empty-doorway thumbnail. Blocking; call via `spawn_blocking`.
 #[must_use]
-pub fn store_idle_jpg<G>(bytes: &[u8], commit_ok: impl FnOnce() -> Option<G>) -> bool {
-    let dir = state_dir();
-    atomic_write_gated_in(&dir, &idle_jpg_file_in(&dir), bytes, commit_ok)
+pub fn store_idle_capture<G>(
+    bytes: &[u8],
+    version: &str,
+    commit_ok: impl FnOnce() -> Option<G>,
+) -> (bool, bool) {
+    store_idle_capture_in(&state_dir(), bytes, version, commit_ok)
+}
+
+fn store_idle_capture_in<G>(
+    dir: &Path,
+    bytes: &[u8],
+    version: &str,
+    commit_ok: impl FnOnce() -> Option<G>,
+) -> (bool, bool) {
+    // Gate + write the JPEG exactly as before; stamp the version ONLY when that store committed, so a
+    // vetoed/failed store leaves both files untouched (a failed capture can't mark a stale thumbnail current).
+    let stored = atomic_write_gated_in(dir, &idle_jpg_file_in(dir), bytes, commit_ok);
+    let stamped = stored && store_idle_version_in(dir, version);
+    (stored, stamped)
 }
 
 fn idle_jpg_file_in(dir: &Path) -> PathBuf {
@@ -341,16 +365,6 @@ pub fn read_idle_version() -> Option<String> {
     read_idle_version_in(&state_dir())
 }
 
-/// Persist the version that captured the current `idle.jpg` (issue #176). Written by `capture_idle` right
-/// after a successful `store_idle_jpg`, so the stamp tracks the bytes actually on disk. Atomic write + dir
-/// fsync like every other record. Returns `true` on success; a `false` (I/O blip) is self-healing — the
-/// next boot simply reads a mismatch and re-captures once. Blocking; call via `spawn_blocking`.
-#[must_use]
-pub fn store_idle_version(version: &str) -> bool {
-    let dir = state_dir();
-    store_idle_version_in(&dir, version)
-}
-
 fn idle_version_file_in(dir: &Path) -> PathBuf {
     dir.join(IDLE_VERSION_FILE)
 }
@@ -361,6 +375,10 @@ pub(crate) fn read_idle_version_in(dir: &Path) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
+/// Persist the version that captured the current `idle.jpg` (issue #176). Called by
+/// [`store_idle_capture_in`] right after a successful image store, so the stamp tracks the bytes actually
+/// on disk. Atomic write + dir fsync like every other record. Returns `true` on success; a `false` (I/O
+/// blip) is self-healing — the next boot reads a mismatch and re-captures once.
 fn store_idle_version_in(dir: &Path, version: &str) -> bool {
     atomic_write_in(dir, &idle_version_file_in(dir), format!("{version}\n").as_bytes())
 }
@@ -973,6 +991,41 @@ mod tests {
         // An empty/whitespace file reads back as None (treated as no stamp → mismatch → refresh).
         assert!(atomic_write_in(&dir, &file, b"\n"));
         assert_eq!(read_idle_version_in(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn store_idle_capture_stamps_the_version_only_after_a_successful_store() {
+        // The capture commit seam (issue #176): capture_idle persists the JPEG and the version stamp through
+        // store_idle_capture, which must write the stamp ONLY when the image store commits — so a regression
+        // that dropped the stamp, or moved it out of the successful-store branch, fails here (it never runs
+        // the full ffmpeg/SIP capture). Directory-injected core; no filesystem env mutation → parallel-safe.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(9900);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-idlecap-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let doorway = b"\xff\xd8\xff\xe0 doorway \xff\xd9";
+
+        // Successful store (commit gate returns Some): idle.jpg is written AND the version is stamped.
+        assert_eq!(
+            store_idle_capture_in(&dir, doorway, "1.2.3", || Some(())),
+            (true, true)
+        );
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&doorway[..]));
+        assert_eq!(read_idle_version_in(&dir).as_deref(), Some("1.2.3"));
+
+        // VETOED store (commit gate returns None — e.g. a ring landed during the write): NEITHER the image
+        // NOR the stamp changes, so a failed capture can't mark the OLD thumbnail as current. The would-be
+        // new version (9.9.9) must NOT be written.
+        let visitor = b"\xff\xd8\xff\xe0 visitor \xff\xd9";
+        assert_eq!(
+            store_idle_capture_in(&dir, visitor, "9.9.9", || Option::<()>::None),
+            (false, false)
+        );
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&doorway[..]), "image must be untouched on veto");
+        assert_eq!(read_idle_version_in(&dir).as_deref(), Some("1.2.3"), "stamp must be untouched on veto");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
