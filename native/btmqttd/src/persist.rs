@@ -306,8 +306,9 @@ pub fn read_idle_jpg() -> Option<Vec<u8>> {
 }
 
 /// Persist a captured idle snapshot (issue #169) AND, only when that store commits, stamp the version that
-/// captured it (issue #176) — as ONE unit, so the two can't drift. The first-run auto-capture and the HA
-/// "Update idle snapshot" button both go through here. Returns `(stored, stamped)`:
+/// captured it (issue #176) — both in ONE blocking step, though NOT an atomic pair (see the recovery note
+/// below). The first-run auto-capture and the HA "Update idle snapshot" button both go through here.
+/// Returns `(stored, stamped)`:
 ///   * `stored` — whether `idle.jpg` was (re)written and made durable. `true` only when the rename
 ///     committed AND the parent-dir fsync succeeded; a post-rename fsync failure returns `false` even
 ///     though `idle.jpg` may already have been replaced in the (not-yet-durable) directory, so treat
@@ -316,9 +317,12 @@ pub fn read_idle_jpg() -> Option<Vec<u8>> {
 ///   * `stamped` — whether the `idle.version` sidecar was then written. Best-effort: a `false` self-heals
 ///     (the next boot reads a mismatch and re-captures once), so it never fails the store.
 ///
-/// The version stamp is written ONLY on a successful store, so a vetoed or failed capture leaves BOTH
-/// `idle.jpg` and `idle.version` untouched — a failed capture can never mark an OLD thumbnail as current
-/// (issue #176). The image write, its fsync, and the stamp all share one blocking step and the same state
+/// The version stamp is written ONLY on a successful store: the image rename+fsync commits FIRST, then a
+/// SEPARATE sidecar write. A commit VETO (a ring detected during the write → `commit_ok` returns `None`)
+/// leaves BOTH `idle.jpg` and `idle.version` untouched. The other `stored == false` path — a post-rename
+/// dir-fsync failure — may already have REPLACED `idle.jpg`, but the NEW stamp is still not written, so an
+/// old/absent stamp beside a possibly-new image reads as a mismatch and re-captures next boot. Either way a
+/// failed capture can never mark an OLD thumbnail as CURRENT (issue #176). The image write, its fsync, and the stamp all share one blocking step and the same state
 /// dir, so the sidecar tracks the bytes actually on disk. Both live on the reboot- and reflash-persistent
 /// `cfg/extra` partition. NOT keyed: the newest capture is always the wanted one. The caller has already
 /// validated the bytes are a real JPEG.

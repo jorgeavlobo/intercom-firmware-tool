@@ -878,8 +878,9 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
             eprintln!("btmqttd: capture: idle snapshot updated");
             if !stamped {
                 eprintln!(
-                    "btmqttd: capture: could not persist the idle-snapshot version stamp; \
-                     the next boot will re-capture once (self-healing)"
+                    "btmqttd: capture: could not persist the idle-snapshot version stamp; the image and \
+                     its stamp may now disagree — the next boot re-checks and re-captures only on a \
+                     version mismatch (self-healing; a same-version refresh simply keeps this image)"
                 );
             }
         } else {
