@@ -27,8 +27,10 @@ namespace IntercomFirmwareTool.Core
         // MyHOME writes/reads (and the form the device reports via *#13**17## as 2*0*0). Use [0-9],
         // not \d: in .NET \d matches every Unicode decimal digit (e.g. Arabic-Indic "٠٢.٠٠.٠٠"),
         // but the manifest/MyHOME format is strictly ASCII, so only ASCII digits may be accepted.
+        // Anchor with \A…\z, not ^…$: in .NET $ also matches just before a trailing '\n', so a
+        // "02.00.00\n" would otherwise pass and be injected verbatim. \z pins the absolute end.
         private static readonly Regex HwVerPattern =
-            new(@"^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$", RegexOptions.CultureInvariant);
+            new(@"\A[0-9]{2}\.[0-9]{2}\.[0-9]{2}\z", RegexOptions.CultureInvariant);
 
         /// <summary>
         /// Returns a copy of the <paramref name="manifestXml"/> bytes with

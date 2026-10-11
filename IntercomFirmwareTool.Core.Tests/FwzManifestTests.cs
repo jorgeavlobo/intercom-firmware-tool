@@ -66,6 +66,7 @@ public class FwzManifestTests
     [InlineData("02.00.00.00")] // too many groups
     [InlineData("xx.yy.zz")] // not digits
     [InlineData("٠٢.٠٠.٠٠")] // Arabic-Indic "٠٢.٠٠.٠٠": \d would accept, [0-9] must not
+    [InlineData("02.00.00\n")] // trailing newline: .NET $ would accept, \z must not
     [InlineData("")]
     public void Rejects_a_malformed_hardware_version(string bad)
     {
@@ -97,6 +98,7 @@ public class FwzManifestTests
     [InlineData("2.0.0", false)]
     [InlineData("02.00", false)]
     [InlineData("٠٢.٠٠.٠٠", false)] // Arabic-Indic digits are not ASCII
+    [InlineData("02.00.00\n", false)] // trailing newline must be rejected (\z, not $)
     [InlineData("", false)]
     [InlineData(null, false)]
     public void IsValidHwVer_matches_the_NN_NN_NN_shape(string? value, bool expected)
