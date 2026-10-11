@@ -24,9 +24,11 @@ namespace IntercomFirmwareTool.Core
         internal const string ReqHwVerElement = "req_hw_ver";
 
         // A hardware version is three dot-separated 2-digit groups, e.g. "02.00.00" — the form
-        // MyHOME writes/reads (and the form the device reports via *#13**17## as 2*0*0).
+        // MyHOME writes/reads (and the form the device reports via *#13**17## as 2*0*0). Use [0-9],
+        // not \d: in .NET \d matches every Unicode decimal digit (e.g. Arabic-Indic "٠٢.٠٠.٠٠"),
+        // but the manifest/MyHOME format is strictly ASCII, so only ASCII digits may be accepted.
         private static readonly Regex HwVerPattern =
-            new(@"^\d{2}\.\d{2}\.\d{2}$", RegexOptions.CultureInvariant);
+            new(@"^[0-9]{2}\.[0-9]{2}\.[0-9]{2}$", RegexOptions.CultureInvariant);
 
         /// <summary>
         /// Returns a copy of the <paramref name="manifestXml"/> bytes with

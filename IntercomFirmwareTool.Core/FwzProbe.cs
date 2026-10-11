@@ -215,7 +215,7 @@ namespace IntercomFirmwareTool.Core
         /// .fwz is never modified; the output is for validation, not flashing.
         /// </summary>
         public static FwzBuildResult BuildModifiedFwz(string inputFwz, EnableSshOptions opts, string outputPath,
-            MqttOptions? mqttOpts = null, bool removeSig = true, bool applyReqHwVerFix = true)
+            MqttOptions? mqttOpts = null, bool removeSig = true)
         {
             // Repack opens the output with FileMode.Create while still reading the
             // input; if they are the same file the source is truncated mid-read
@@ -281,9 +281,10 @@ namespace IntercomFirmwareTool.Core
             // manifest so MyHOME Suite does not default required hardware to 03.00.00 and reject a
             // hardware-2.0 device with error 1063 ("service pack inadequate"). null = leave fwz.xml
             // untouched, which is the default for every other firmware (C100X included) and keeps their
-            // output byte-for-byte as before. Gated by the whitelisted match: the value is curated data,
-            // never caller-supplied, so it can only apply to a recognized, eligible firmware.
-            string? reqHwVerToInject = applyReqHwVerFix ? verified.Match?.ReqHwVerFix : null;
+            // output byte-for-byte as before. Gated solely by the whitelisted match: the value is curated
+            // data, never caller-supplied and with no caller opt-out, so for an eligible firmware the fix
+            // is mandatory — no API caller can produce an eligible output that still hits error 1063.
+            string? reqHwVerToInject = verified.Match?.ReqHwVerFix;
 
             FwzExtractResult ex = ExtractBareImage(realInput);
             string? modifiedBare = null;
