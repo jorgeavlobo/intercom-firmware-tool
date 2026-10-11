@@ -90,7 +90,9 @@ namespace IntercomFirmwareTool.Core
         /// <c>fwz.xml</c> omits <c>req_hw_ver</c>, so MyHOME defaults required hardware to
         /// <c>03.00.00</c> while the device is hardware 2.0.0 → 1063. Declaring <c>02.00.00</c> makes
         /// the gate pass (and only lowers the required bar for the same image). See <see cref="FwzManifest"/>
-        /// and issue #191. Hardware-validated on 344642 / 1.7.19; the mechanism is identical for 1.7.17.</para>
+        /// and issue #191. Validated off-device (the build round-trips the injected value); acceptance and
+        /// flashing on a real hardware-2.0 C300X (344642 / 1.7.19) are not yet confirmed. The mechanism is
+        /// identical for 1.7.17.</para>
         ///
         /// Init-only (not a constructor parameter) so adding it does not disturb the positional
         /// construction of the existing entries; only the two affected entries opt in.
