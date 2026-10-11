@@ -215,7 +215,7 @@ namespace IntercomFirmwareTool.Core
         /// .fwz is never modified; the output is for validation, not flashing.
         /// </summary>
         public static FwzBuildResult BuildModifiedFwz(string inputFwz, EnableSshOptions opts, string outputPath,
-            MqttOptions? mqttOpts = null, bool removeSig = true)
+            MqttOptions? mqttOpts = null, bool removeSig = true, bool applyReqHwVerFix = true)
         {
             // Repack opens the output with FileMode.Create while still reading the
             // input; if they are the same file the source is truncated mid-read
@@ -276,6 +276,15 @@ namespace IntercomFirmwareTool.Core
                 throw new InvalidOperationException(
                     CoreStrings.Format("Fwz_RefuseHomeSecurity", verified.Match.OriginalName));
 
+            // fwz.xml req_hw_ver fix (issue #191): for the firmwares that need it — curated in the
+            // registry, i.e. the Classe 300X13E Door Entry (branch 1.7) — declare <req_hw_ver> in the
+            // manifest so MyHOME Suite does not default required hardware to 03.00.00 and reject a
+            // hardware-2.0 device with error 1063 ("service pack inadequate"). null = leave fwz.xml
+            // untouched, which is the default for every other firmware (C100X included) and keeps their
+            // output byte-for-byte as before. Gated by the whitelisted match: the value is curated data,
+            // never caller-supplied, so it can only apply to a recognized, eligible firmware.
+            string? reqHwVerToInject = applyReqHwVerFix ? verified.Match?.ReqHwVerFix : null;
+
             FwzExtractResult ex = ExtractBareImage(realInput);
             string? modifiedBare = null;
             string? modifiedGz = null;
@@ -303,7 +312,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     try
                     {
-                        Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut, removeSig);
+                        Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut, removeSig, reqHwVerToInject);
                     }
                     catch (Exception repackEx)
                     {
@@ -394,6 +403,32 @@ namespace IntercomFirmwareTool.Core
                         removeSig ? ".sig sidecars removed"
                                   : ".sig sidecars kept unchanged (name + content)",
                         sigOk, sigDetail));
+
+                    // req_hw_ver fix (#191): when a fix applies, assert the injected value actually
+                    // round-tripped into the OUTPUT's fwz.xml — so a missing manifest, a transform
+                    // regression, or a repack bug fails the build instead of shipping an unfixed .fwz
+                    // that would still hit error 1063. When no fix applies, fwz.xml is untouched and
+                    // this check is skipped (nothing was supposed to change).
+                    if (reqHwVerToInject != null)
+                    {
+                        bool reqOk;
+                        string reqDetail;
+                        try
+                        {
+                            string? got = ReadManifestReqHwVer(tempOut, ex.PasswordUsed);
+                            reqOk = string.Equals(got, reqHwVerToInject, StringComparison.Ordinal);
+                            reqDetail = $"got '{got ?? "(absent)"}'";
+                        }
+                        catch (Exception reqEx)
+                        {
+                            reqOk = false;
+                            reqDetail = string.IsNullOrWhiteSpace(reqEx.Message)
+                                ? reqEx.GetType().Name : reqEx.Message;
+                        }
+                        checkList.Add(new Ext4Check(
+                            $"fwz.xml declares req_hw_ver {reqHwVerToInject} (MyHOME 1063 fix)",
+                            reqOk, reqDetail));
+                    }
 
                     IReadOnlyList<Ext4Check> checks = checkList;
                     bool all = true;
@@ -503,10 +538,16 @@ namespace IntercomFirmwareTool.Core
         /// get the archive rejected by a signature-checking updater. When false, the
         /// original <c>.sig</c> entries are carried over verbatim (for parity /
         /// research — note the sidecar for the modified payload is then stale).</para>
+        /// <para>When <paramref name="injectReqHwVer"/> is non-null, the <c>fwz.xml</c> manifest is
+        /// ALSO rewritten — <c>&lt;req_hw_ver&gt;</c> is declared via <see cref="FwzManifest.InjectReqHwVer"/>
+        /// (issue #191) — rather than carried over verbatim, so MyHOME Suite accepts the service pack on a
+        /// hardware-2.0 Classe 300X13E instead of failing with error 1063. Like the modified payload, the
+        /// rewritten manifest's uncompressed size + CRC are stamped before <c>PutNextEntry</c> to keep the
+        /// "classic ZIP" form. Null (the default) leaves <c>fwz.xml</c> untouched.</para>
         /// </summary>
         private static void Repack(
             string inputFwz, string password, string modifiedEntryName,
-            string modifiedGzPath, string outputPath, bool removeSig)
+            string modifiedGzPath, string outputPath, bool removeSig, string? injectReqHwVer = null)
         {
             using var srcZip = new ZipFile(inputFwz) { Password = password };
             using var outFs = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
@@ -527,6 +568,22 @@ namespace IntercomFirmwareTool.Core
                     continue;
 
                 bool isModified = string.Equals(src.Name, modifiedEntryName, StringComparison.Ordinal);
+                // The service-pack manifest: rewritten (req_hw_ver declared) only when a fix is
+                // requested; otherwise it falls through to the verbatim path like any other entry.
+                bool isManifest = injectReqHwVer != null &&
+                    string.Equals(src.Name, "fwz.xml", StringComparison.OrdinalIgnoreCase);
+
+                // Materialize the rewritten manifest bytes up front, so its uncompressed size + CRC
+                // can be stamped before PutNextEntry (same "classic ZIP" requirement as the modified
+                // payload). Read the source entry decrypted (srcZip holds the password) and inject.
+                byte[]? manifestBytes = null;
+                if (isManifest)
+                {
+                    using var s = srcZip.GetInputStream(src);
+                    using var mem = new MemoryStream();
+                    s.CopyTo(mem);
+                    manifestBytes = FwzManifest.InjectReqHwVer(mem.ToArray(), injectReqHwVer!);
+                }
 
                 // Mark the entry ZipCrypto-encrypted explicitly (not only via the
                 // stream Password): the device firmware requires traditional
@@ -558,6 +615,12 @@ namespace IntercomFirmwareTool.Core
                     entry.Size = len;
                     entry.Crc = crc;
                 }
+                else if (isManifest)
+                {
+                    // The rewritten manifest is in memory: stamp its exact size + CRC.
+                    entry.Size = manifestBytes!.Length;
+                    entry.Crc = Crc32Of(manifestBytes!);
+                }
                 else
                 {
                     // Carried over verbatim: the uncompressed bytes (hence size + CRC) are
@@ -572,6 +635,10 @@ namespace IntercomFirmwareTool.Core
                 {
                     using var gzFs = new FileStream(modifiedGzPath, FileMode.Open, FileAccess.Read);
                     gzFs.CopyTo(zipOut);
+                }
+                else if (isManifest)
+                {
+                    zipOut.Write(manifestBytes!, 0, manifestBytes!.Length);
                 }
                 else
                 {
@@ -603,6 +670,37 @@ namespace IntercomFirmwareTool.Core
                 length += n;
             }
             return (length, crc.Value);
+        }
+
+        /// <summary>CRC-32 (standard ZIP polynomial) of an in-memory buffer — used to stamp the
+        /// rewritten <c>fwz.xml</c> entry's <see cref="ZipEntry.Crc"/> before writing, keeping the
+        /// repacked .fwz in the "classic ZIP" form MyHOME Suite accepts (see <see cref="Repack"/>).</summary>
+        private static long Crc32Of(byte[] data)
+        {
+            var crc = new Crc32();
+            crc.Update(data);
+            return crc.Value;
+        }
+
+        /// <summary>
+        /// Reads the <c>&lt;req_hw_ver&gt;</c> value declared in a .fwz's <c>fwz.xml</c> manifest, or
+        /// <c>null</c> when the manifest entry or the element is absent. Used by the build's round-trip
+        /// to confirm the issue #191 injection landed in the output. The password decrypts the
+        /// (ZipCrypto) manifest bytes, same as every other entry.
+        /// </summary>
+        private static string? ReadManifestReqHwVer(string fwz, string password)
+        {
+            using var zf = new ZipFile(fwz) { Password = password };
+            foreach (ZipEntry e in zf)
+            {
+                if (!e.IsFile || !string.Equals(e.Name, "fwz.xml", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                using var s = zf.GetInputStream(e);
+                using var mem = new MemoryStream();
+                s.CopyTo(mem);
+                return FwzManifest.ReadReqHwVer(mem.ToArray());
+            }
+            return null; // no manifest entry in the archive
         }
 
         /// <summary>

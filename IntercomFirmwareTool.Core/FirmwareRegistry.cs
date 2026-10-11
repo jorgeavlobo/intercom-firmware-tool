@@ -80,6 +80,22 @@ namespace IntercomFirmwareTool.Core
             "Classe 300X" => "BTicino Classe 300X",
             _ => null,
         };
+
+        /// <summary>
+        /// The <c>&lt;req_hw_ver&gt;</c> value to declare in this firmware's <c>fwz.xml</c> at build
+        /// time to avoid MyHOME Suite error 1063 ("service pack inadequate"), or <c>null</c> when no
+        /// fix applies (the default — <c>fwz.xml</c> is then carried over byte-for-byte, unchanged).
+        ///
+        /// <para>Set only for the <b>Classe 300X13E (Door Entry, branch 1.7)</b> firmwares: their
+        /// <c>fwz.xml</c> omits <c>req_hw_ver</c>, so MyHOME defaults required hardware to
+        /// <c>03.00.00</c> while the device is hardware 2.0.0 → 1063. Declaring <c>02.00.00</c> makes
+        /// the gate pass (and only lowers the required bar for the same image). See <see cref="FwzManifest"/>
+        /// and issue #191. Hardware-validated on 344642 / 1.7.19; the mechanism is identical for 1.7.17.</para>
+        ///
+        /// Init-only (not a constructor parameter) so adding it does not disturb the positional
+        /// construction of the existing entries; only the two affected entries opt in.
+        /// </summary>
+        public string? ReqHwVerFix { get; init; }
     }
 
     /// <summary>
@@ -187,12 +203,14 @@ namespace IntercomFirmwareTool.Core
                 "D0C42410254A9DFA4F18D2F8A94B2CBD7C99A393AC78334463D1EC4D3320F517",
                 "FD7FBC5522488A257075CE2792B0D2D4", true,
                 "Classe 300X", "1.7.17", "Door Entry", new[] { M300X_Dark },
-                "https://www.homesystems-legrandgroup.com/MatrixENG/liferay/bt_mxLiferayCheckout.jsp?fileFormat=generic&fileName=C300X_010717.fwz&fileId=58107.23188.15908.12349"),
+                "https://www.homesystems-legrandgroup.com/MatrixENG/liferay/bt_mxLiferayCheckout.jsp?fileFormat=generic&fileName=C300X_010717.fwz&fileId=58107.23188.15908.12349")
+                { ReqHwVerFix = "02.00.00" }, // 300X13E HW 2.0 → avoid MyHOME 1063 (#191)
             new KnownFirmware("C300X_010719.fwz", 100510249,
                 "8E6FDE2070168704FDD46DF8825FF124F993A0C81AC1EE32EBDCC5821EC2DBA7",
                 "70795123E8A6C06E324909862B062522", true,
                 "Classe 300X", "1.7.19", "Door Entry", new[] { M300X_Light, M300X_Dark },
-                "https://assets.legrand.com/pim/AUTRE/C300X_010719.fwz"),
+                "https://assets.legrand.com/pim/AUTRE/C300X_010719.fwz")
+                { ReqHwVerFix = "02.00.00" }, // 300X13E HW 2.0 → avoid MyHOME 1063 (#191)
 
             // ---- Classe 300X (344742) — Home + Security ----
             new KnownFirmware("C3X2_010105.fwz", 220525872,
