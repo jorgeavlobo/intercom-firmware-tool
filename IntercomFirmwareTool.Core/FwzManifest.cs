@@ -42,8 +42,9 @@ namespace IntercomFirmwareTool.Core
         /// <item>present and DIFFERENT → throws (we never silently override a declared
         ///   requirement — the source manifest for the fixed case has none).</item>
         /// </list>
-        /// Pure: no I/O. The XML declaration and existing whitespace are preserved; the
-        /// output carries no BOM (the BTicino manifest has none).
+        /// Pure: no I/O. The XML declaration and existing whitespace are preserved. For the UTF-8
+        /// manifest these firmwares ship (the only case that occurs), the output carries no BOM; a
+        /// non-UTF-8 declaration keeps the BOM its encoding requires (see <see cref="Serialize"/>).
         /// </summary>
         /// <param name="manifestXml">The decrypted <c>fwz.xml</c> bytes.</param>
         /// <param name="reqHwVer">The required-hardware value to declare, e.g. <c>"02.00.00"</c>.</param>
