@@ -124,7 +124,17 @@ namespace IntercomFirmwareTool.Core
             using var ms = new MemoryStream();
             using (var writer = XmlWriter.Create(ms, settings))
                 doc.Save(writer);
-            return ms.ToArray();
+
+            // Honour the no-BOM contract for EVERY encoding, not only UTF-8: XmlWriter emits the
+            // selected encoding's preamble (a BOM) for UTF-16/UTF-32. Strip it if present so a strict
+            // reader never sees one. Real BTicino manifests are UTF-8 (ResolveEncoding already picks a
+            // BOM-less UTF-8 encoder there); this also covers any other declared Unicode encoding.
+            byte[] bytes = ms.ToArray();
+            byte[] preamble = encoding.GetPreamble();
+            if (preamble.Length > 0 && bytes.Length >= preamble.Length &&
+                bytes.AsSpan(0, preamble.Length).SequenceEqual(preamble))
+                bytes = bytes[preamble.Length..];
+            return bytes;
         }
 
         private static Encoding ResolveEncoding(string? declared)

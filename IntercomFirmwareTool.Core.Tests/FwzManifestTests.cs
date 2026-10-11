@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text;
 using System.Xml.Linq;
 using IntercomFirmwareTool.Core;
@@ -77,6 +78,28 @@ public class FwzManifestTests
     public void ReadReqHwVer_is_null_when_absent()
     {
         Assert.Null(FwzManifest.ReadReqHwVer(ManifestWithout()));
+    }
+
+    [Fact]
+    public void Output_strips_the_BOM_for_a_UTF16_declared_manifest()
+    {
+        // The no-BOM contract must hold for a non-UTF-8 manifest too: a manifest that declares (and is
+        // encoded as) UTF-16 must still serialize without any byte-order mark.
+        var utf16 = new UnicodeEncoding(bigEndian: false, byteOrderMark: true);
+        byte[] input = utf16.GetPreamble()
+            .Concat(utf16.GetBytes(
+                "<?xml version=\"1.0\" encoding=\"utf-16\"?><fwz><model>1.0.68</model></fwz>"))
+            .ToArray();
+
+        byte[] outBytes = FwzManifest.InjectReqHwVer(input, "02.00.00");
+
+        // No BOM of any Unicode flavour at the start of the output.
+        Assert.False(outBytes.Length >= 2 && outBytes[0] == 0xFF && outBytes[1] == 0xFE, "no UTF-16 LE BOM");
+        Assert.False(outBytes.Length >= 2 && outBytes[0] == 0xFE && outBytes[1] == 0xFF, "no UTF-16 BE BOM");
+        Assert.False(outBytes.Length >= 3 && outBytes[0] == 0xEF && outBytes[1] == 0xBB && outBytes[2] == 0xBF,
+            "no UTF-8 BOM");
+        // The value still round-trips (the declaration's utf-16 lets the reader decode the output).
+        Assert.Equal("02.00.00", FwzManifest.ReadReqHwVer(outBytes));
     }
 
     [Fact]
