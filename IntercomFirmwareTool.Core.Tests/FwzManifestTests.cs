@@ -107,15 +107,22 @@ public class FwzManifestTests
     [Fact]
     public void Registry_scopes_the_req_hw_ver_fix_to_the_300X13E_door_entry_firmwares()
     {
-        // Gating invariant (#191): the fix is curated ONLY for the Classe 300X13E Door Entry (branch 1.7)
-        // firmwares — the ones whose fwz.xml omits req_hw_ver on a HW-2.0 unit. Every other firmware
-        // (C100X, the Home+Security 300X/EOS) must carry no fix, so its fwz.xml is left untouched and its
-        // output stays byte-for-byte as before. Any curated value must itself be a valid NN.NN.NN.
+        // Gating invariant (#191): the fix is curated ONLY for the two exact Classe 300X13E Door Entry
+        // (branch 1.7) originals whose fwz.xml omits req_hw_ver on a HW-2.0 unit — keyed by OriginalName,
+        // NOT by Line+App. Keying it on the model line would legitimize auto-applying 02.00.00 to ANY
+        // future 300X Door Entry firmware (a later branch, or a HW-3.0 generation that needs a different
+        // value or none) — exactly the accidental expansion this invariant must catch. Every other
+        // firmware (C100X, the Home+Security 300X/EOS, and any not-yet-vetted 300X) must carry no fix, so
+        // its fwz.xml is left untouched and its output stays byte-for-byte as before. Any curated value
+        // must itself be a valid NN.NN.NN.
+        var eligibleOriginals = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "C300X_010717.fwz", // 300X13E branch 1.7.17
+            "C300X_010719.fwz", // 300X13E branch 1.7.19
+        };
         foreach (var k in FirmwareRegistry.Known)
         {
-            bool eligible = k.Line == "Classe 300X" &&
-                string.Equals(k.App, "Door Entry", StringComparison.OrdinalIgnoreCase);
-            if (eligible)
+            if (eligibleOriginals.Contains(k.OriginalName))
             {
                 Assert.Equal("02.00.00", k.ReqHwVerFix);
                 Assert.True(FwzManifest.IsValidHwVer(k.ReqHwVerFix));
@@ -126,10 +133,9 @@ public class FwzManifestTests
             }
         }
 
-        // The two known 300X13E originals are covered.
-        Assert.Contains(FirmwareRegistry.Known,
-            k => k.OriginalName == "C300X_010719.fwz" && k.ReqHwVerFix == "02.00.00");
-        Assert.Contains(FirmwareRegistry.Known,
-            k => k.OriginalName == "C300X_010717.fwz" && k.ReqHwVerFix == "02.00.00");
+        // Both curated originals are actually present in the registry (so the "iff" above is not
+        // vacuously satisfied by their absence).
+        foreach (var original in eligibleOriginals)
+            Assert.Contains(FirmwareRegistry.Known, k => k.OriginalName == original);
     }
 }
