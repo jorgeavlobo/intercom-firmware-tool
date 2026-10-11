@@ -110,8 +110,11 @@ namespace IntercomFirmwareTool.Core
         private static byte[] Serialize(XDocument doc)
         {
             // Match the original declaration: keep it if present, and honour its encoding
-            // (default UTF-8). Never emit a BOM — the BTicino manifest has none and a stray BOM
-            // could trip a strict reader. Do not re-indent (PreserveWhitespace already kept the
+            // (default UTF-8). The BTicino manifest is UTF-8, and ResolveEncoding returns a BOM-less
+            // UTF-8 encoder, so the manifest we actually ship carries no BOM (a stray UTF-8 BOM could
+            // trip a strict reader). A non-UTF-8 declaration — which these firmwares never use — keeps
+            // whatever BOM its encoding requires (a UTF-16/UTF-32 XML entity is REQUIRED to begin with
+            // one), so we do not strip it. Do not re-indent (PreserveWhitespace already kept the
             // layout); the one added element sits after the last child.
             Encoding encoding = ResolveEncoding(doc.Declaration?.Encoding);
             var settings = new XmlWriterSettings
@@ -124,17 +127,7 @@ namespace IntercomFirmwareTool.Core
             using var ms = new MemoryStream();
             using (var writer = XmlWriter.Create(ms, settings))
                 doc.Save(writer);
-
-            // Honour the no-BOM contract for EVERY encoding, not only UTF-8: XmlWriter emits the
-            // selected encoding's preamble (a BOM) for UTF-16/UTF-32. Strip it if present so a strict
-            // reader never sees one. Real BTicino manifests are UTF-8 (ResolveEncoding already picks a
-            // BOM-less UTF-8 encoder there); this also covers any other declared Unicode encoding.
-            byte[] bytes = ms.ToArray();
-            byte[] preamble = encoding.GetPreamble();
-            if (preamble.Length > 0 && bytes.Length >= preamble.Length &&
-                bytes.AsSpan(0, preamble.Length).SequenceEqual(preamble))
-                bytes = bytes[preamble.Length..];
-            return bytes;
+            return ms.ToArray();
         }
 
         private static Encoding ResolveEncoding(string? declared)
