@@ -24,19 +24,27 @@ All operations below are verified against fquinto's `main.py` (upstream, GPL-2.0
 
 ## (a) Files touched vs untouched
 
-Inside the `.fwz` — only 1 of the 4 entries is modified:
+Inside the `.fwz` — `btweb_only.ext4.gz` is always modified; `fwz.xml` is
+additionally rewritten only for the firmwares the registry flags for the #191
+`req_hw_ver` fix:
 
 | Entry in the `.fwz` | Action |
 |---|---|
 | `btweb_only.ext4.gz` | ✏️ **modified** (the rootfs) |
 | `btweb_only_recovery.ext4.gz` | ⬜ untouched, repacked as-is |
-| `fwz.xml` | ⬜ untouched ¹ |
+| `fwz.xml` | ⬜ untouched by default; ✏️ **rewritten** for registry-flagged firmwares (#191) ¹ |
 | `uImage.zip` | ⬜ untouched |
 
-> ¹ Leaving `fwz.xml` untouched is safe **because fquinto leaves it untouched
-> and its output works on real devices** → the updater does not verify a
-> checksum/signature of the payload against `fwz.xml`. We rely on this
-> empirical fact (and keep recovery ready before any flash).
+> ¹ By default `fwz.xml` is left untouched — safe **because fquinto leaves it
+> untouched and its output works on real devices** → the updater does not verify
+> a checksum/signature of the payload against `fwz.xml`. We rely on this
+> empirical fact (and keep recovery ready before any flash). For the firmwares
+> the registry flags with `ReqHwVerFix` (the Classe 300X13E Door Entry, #191),
+> `fwz.xml` is instead **rewritten** to declare `<req_hw_ver>` — a single added
+> element, re-stamped with its uncompressed size + CRC before `PutNextEntry` (the
+> classic-ZIP form MyHOME requires) and round-trip-verified in the rebuilt `.fwz`.
+> Every other firmware keeps `fwz.xml` byte-for-byte. See
+> `IntercomFirmwareTool.Core/FwzManifest.cs` and `FwzProbe.Repack`.
 >
 > ² **The `.ssh` dir is 0755, matching fquinto exactly.** Neither
 > `/home/root/.ssh` nor any `authorized_keys` exists in the factory firmware —
