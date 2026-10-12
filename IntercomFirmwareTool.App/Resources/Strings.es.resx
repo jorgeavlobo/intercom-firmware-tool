@@ -43,6 +43,9 @@
   <data name="Field_Firmware" xml:space="preserve"><value>Firmware:</value></data>
   <data name="Field_Password_Simple" xml:space="preserve"><value>Contraseña:</value></data>
   <data name="Field_Password_Advanced" xml:space="preserve"><value>Contraseña de root:</value></data>
+  <data name="Field_User" xml:space="preserve"><value>Usuario:</value></data>
+  <data name="Tip_User" xml:space="preserve"><value>La compilación crea esta cuenta de inicio de sesión — un nuevo superusuario (root2, uid 0). La cuenta de fábrica "root" queda intacta; inicia sesión como root2.</value></data>
+  <data name="Hint_User" xml:space="preserve"><value>Creada por la compilación — conéctate con:  ssh root2@&lt;device&gt;</value></data>
   <data name="Field_ConfirmPassword" xml:space="preserve"><value>Confirmar contraseña:</value></data>
   <data name="Field_SaveOutput" xml:space="preserve"><value>Guardar salida como:</value></data>
   <data name="Field_SshKey" xml:space="preserve"><value>Clave pública SSH:</value></data>
@@ -277,6 +280,7 @@ Compilar ahí sobrescribiría y destruiría la clave. Elija una salida diferente
   <data name="Fmt_Result_Build_Input" xml:space="preserve"><value>  Entrada    : {0}</value></data>
   <data name="Result_Build_RootPw_Set" xml:space="preserve"><value>  Contr. root: (establecida — almacenada como MD5-crypt $1$root$…)</value></data>
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Contr. root: (deshabilitada — inicio de sesión solo con clave)</value></data>
+  <data name="Result_Build_LoginUser" xml:space="preserve"><value>  Usuario    : root2  (conéctate con: ssh root2@&lt;device&gt;)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Clave púb. : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Clave púb. : (ninguna — solo inicio de sesión con contraseña)</value></data>
   <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Actualización : (bloqueada — servidores de actualización Legrand redirigidos a 127.0.0.1)</value></data>

@@ -43,6 +43,9 @@
   <data name="Field_Firmware" xml:space="preserve"><value>Firmware :</value></data>
   <data name="Field_Password_Simple" xml:space="preserve"><value>Mot de passe :</value></data>
   <data name="Field_Password_Advanced" xml:space="preserve"><value>Mot de passe root :</value></data>
+  <data name="Field_User" xml:space="preserve"><value>Utilisateur :</value></data>
+  <data name="Tip_User" xml:space="preserve"><value>La compilation crée ce compte de connexion — un nouveau superutilisateur (root2, uid 0). Le compte d'usine « root » reste intact ; connectez-vous en tant que root2.</value></data>
+  <data name="Hint_User" xml:space="preserve"><value>Créé par la compilation — connectez-vous avec :  ssh root2@&lt;device&gt;</value></data>
   <data name="Field_ConfirmPassword" xml:space="preserve"><value>Confirmer le mot de passe :</value></data>
   <data name="Field_SaveOutput" xml:space="preserve"><value>Enregistrer la sortie sous :</value></data>
   <data name="Field_SshKey" xml:space="preserve"><value>Clé publique SSH :</value></data>
@@ -277,6 +280,7 @@ L'écraser ?</value></data>
   <data name="Fmt_Result_Build_Input" xml:space="preserve"><value>  Entrée     : {0}</value></data>
   <data name="Result_Build_RootPw_Set" xml:space="preserve"><value>  Mdp root   : (défini — stocké en MD5-crypt $1$root$…)</value></data>
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Mdp root   : (désactivé — connexion par clé uniquement)</value></data>
+  <data name="Result_Build_LoginUser" xml:space="preserve"><value>  Utilisateur: root2  (connectez-vous avec : ssh root2@&lt;device&gt;)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Clé publique : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Clé publique : (aucune — connexion par mot de passe uniquement)</value></data>
   <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Mise à jour : (bloquée — serveurs de mise à jour Legrand redirigés vers 127.0.0.1)</value></data>

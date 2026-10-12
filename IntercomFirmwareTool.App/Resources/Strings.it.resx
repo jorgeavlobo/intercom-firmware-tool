@@ -43,6 +43,9 @@
   <data name="Field_Firmware" xml:space="preserve"><value>Firmware:</value></data>
   <data name="Field_Password_Simple" xml:space="preserve"><value>Password:</value></data>
   <data name="Field_Password_Advanced" xml:space="preserve"><value>Password di root:</value></data>
+  <data name="Field_User" xml:space="preserve"><value>Utente:</value></data>
+  <data name="Tip_User" xml:space="preserve"><value>La build crea questo account di accesso — un nuovo superutente (root2, uid 0). L'account di fabbrica "root" resta intatto; accedi come root2.</value></data>
+  <data name="Hint_User" xml:space="preserve"><value>Creato dalla build — connettiti con:  ssh root2@&lt;device&gt;</value></data>
   <data name="Field_ConfirmPassword" xml:space="preserve"><value>Conferma password:</value></data>
   <data name="Field_SaveOutput" xml:space="preserve"><value>Salva output come:</value></data>
   <data name="Field_SshKey" xml:space="preserve"><value>Chiave pubblica SSH:</value></data>
@@ -277,6 +280,7 @@ Sovrascriverlo?</value></data>
   <data name="Fmt_Result_Build_Input" xml:space="preserve"><value>  Input      : {0}</value></data>
   <data name="Result_Build_RootPw_Set" xml:space="preserve"><value>  Pw root    : (impostata — memorizzata come MD5-crypt $1$root$…)</value></data>
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Pw root    : (disabilitata — accesso solo-chiave)</value></data>
+  <data name="Result_Build_LoginUser" xml:space="preserve"><value>  Utente     : root2  (connettiti con: ssh root2@&lt;device&gt;)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Chiave pub : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Chiave pub : (nessuna — solo accesso con password)</value></data>
   <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Aggiornamento : (bloccato — server di aggiornamento Legrand reindirizzati a 127.0.0.1)</value></data>
