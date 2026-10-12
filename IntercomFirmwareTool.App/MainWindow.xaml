@@ -870,14 +870,22 @@
                  fixed. Greyed read-only TextBox, value kept verbatim (a technical token). #193 -->
             <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="{loc:Loc Field_User}"/>
-            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="TxtUser" Width="170" Style="{StaticResource InputField}"
+            <!-- A 2-column Grid, not a horizontal StackPanel: a StackPanel measures its children with
+                 unbounded width, so the hint's TextWrapping never triggers and a long localized hint
+                 clips at a narrow window width (horizontal scrolling is disabled). The "*" column gives
+                 the hint finite width so it wraps. -->
+            <Grid Grid.Row="1" Grid.Column="1" Margin="0,0,0,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="TxtUser" Grid.Column="0" Width="170" Style="{StaticResource InputField}"
                          IsReadOnly="True" Foreground="Gray" FontFamily="Consolas" Text="root2"
                          ToolTip="{loc:Loc Tip_User}"
                          AutomationProperties.Name="{loc:Loc Field_User}"/>
-                <TextBlock VerticalAlignment="Center" Margin="10,0,0,0" Foreground="Gray"
+                <TextBlock Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0" Foreground="Gray"
                            FontSize="11" TextWrapping="Wrap" Text="{loc:Loc Hint_User}"/>
-            </StackPanel>
+            </Grid>
 
             <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
                  the password or the key is required; ticking Disable turns password
