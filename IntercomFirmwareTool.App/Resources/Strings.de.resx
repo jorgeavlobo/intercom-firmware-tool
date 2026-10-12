@@ -43,6 +43,9 @@
   <data name="Field_Firmware" xml:space="preserve"><value>Firmware:</value></data>
   <data name="Field_Password_Simple" xml:space="preserve"><value>Passwort:</value></data>
   <data name="Field_Password_Advanced" xml:space="preserve"><value>Root-Passwort:</value></data>
+  <data name="Field_User" xml:space="preserve"><value>Benutzer:</value></data>
+  <data name="Tip_User" xml:space="preserve"><value>Der Build erstellt dieses Anmeldekonto — einen neuen Superuser (root2, uid 0). Das werkseitige „root“-Konto bleibt unberührt; melden Sie sich als root2 an.</value></data>
+  <data name="Hint_User" xml:space="preserve"><value>Vom Build erstellt — verbinden mit:  ssh root2@&lt;device&gt;</value></data>
   <data name="Field_ConfirmPassword" xml:space="preserve"><value>Passwort bestätigen:</value></data>
   <data name="Field_SaveOutput" xml:space="preserve"><value>Ausgabe speichern unter:</value></data>
   <data name="Field_SshKey" xml:space="preserve"><value>Öffentlicher SSH-Schlüssel:</value></data>
@@ -277,6 +280,7 @@ Eine Erstellung dort würde den Schlüssel überschreiben und zerstören. Wähle
   <data name="Fmt_Result_Build_Input" xml:space="preserve"><value>  Eingabe    : {0}</value></data>
   <data name="Result_Build_RootPw_Set" xml:space="preserve"><value>  Root-Pw    : (gesetzt — gespeichert als MD5-crypt $1$root$…)</value></data>
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Root-Pw    : (deaktiviert — Anmeldung nur mit Schlüssel)</value></data>
+  <data name="Result_Build_LoginUser" xml:space="preserve"><value>  Login-User : root2  (verbinden mit: ssh root2@&lt;device&gt;)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Öff. Schlüssel : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Öff. Schlüssel : (keiner — nur Passwort-Anmeldung)</value></data>
   <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Auto-Update : (blockiert — Legrand-Update-Server auf 127.0.0.1 umgeleitet)</value></data>

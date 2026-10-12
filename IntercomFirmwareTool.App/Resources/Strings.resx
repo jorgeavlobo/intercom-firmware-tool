@@ -43,6 +43,9 @@
   <data name="Field_Firmware" xml:space="preserve"><value>Firmware:</value></data>
   <data name="Field_Password_Simple" xml:space="preserve"><value>Password:</value></data>
   <data name="Field_Password_Advanced" xml:space="preserve"><value>Root Password:</value></data>
+  <data name="Field_User" xml:space="preserve"><value>User:</value></data>
+  <data name="Tip_User" xml:space="preserve"><value>The build creates this login account — a new superuser (root2, uid 0). The factory "root" account is left untouched; log in as root2.</value></data>
+  <data name="Hint_User" xml:space="preserve"><value>Created by the build — connect with:  ssh root2@&lt;device&gt;</value></data>
   <data name="Field_ConfirmPassword" xml:space="preserve"><value>Confirm Password:</value></data>
   <data name="Field_SaveOutput" xml:space="preserve"><value>Save Output As:</value></data>
   <data name="Field_SshKey" xml:space="preserve"><value>SSH Public Key:</value></data>
@@ -277,6 +280,7 @@ Overwrite it?</value></data>
   <data name="Fmt_Result_Build_Input" xml:space="preserve"><value>  Input      : {0}</value></data>
   <data name="Result_Build_RootPw_Set" xml:space="preserve"><value>  Root pw    : (set — stored as MD5-crypt $1$root$…)</value></data>
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Root pw    : (disabled — key-only login)</value></data>
+  <data name="Result_Build_LoginUser" xml:space="preserve"><value>  Login user : root2  (connect with: ssh root2@&lt;device&gt;)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Public key : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Public key : (none — password login only)</value></data>
   <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Auto-update : (blocked — Legrand update servers mapped to 127.0.0.1)</value></data>

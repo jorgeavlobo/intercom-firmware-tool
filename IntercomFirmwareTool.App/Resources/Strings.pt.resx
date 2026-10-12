@@ -43,6 +43,9 @@
   <data name="Field_Firmware" xml:space="preserve"><value>Firmware:</value></data>
   <data name="Field_Password_Simple" xml:space="preserve"><value>Palavra-passe:</value></data>
   <data name="Field_Password_Advanced" xml:space="preserve"><value>Palavra-passe de root:</value></data>
+  <data name="Field_User" xml:space="preserve"><value>Utilizador:</value></data>
+  <data name="Tip_User" xml:space="preserve"><value>A build cria esta conta de início de sessão — um novo superutilizador (root2, uid 0). A conta de fábrica "root" fica intacta; inicia sessão como root2.</value></data>
+  <data name="Hint_User" xml:space="preserve"><value>Criada pela build — liga-te com:  ssh root2@&lt;device&gt;</value></data>
   <data name="Field_ConfirmPassword" xml:space="preserve"><value>Confirmar palavra-passe:</value></data>
   <data name="Field_SaveOutput" xml:space="preserve"><value>Guardar resultado como:</value></data>
   <data name="Field_SshKey" xml:space="preserve"><value>Chave pública SSH:</value></data>
@@ -277,6 +280,7 @@ Substituir?</value></data>
   <data name="Fmt_Result_Build_Input" xml:space="preserve"><value>  Entrada      : {0}</value></data>
   <data name="Result_Build_RootPw_Set" xml:space="preserve"><value>  Pw root      : (definida — armazenada como MD5-crypt $1$root$…)</value></data>
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Pw root      : (desativada — início de sessão apenas por chave)</value></data>
+  <data name="Result_Build_LoginUser" xml:space="preserve"><value>  Utilizador : root2  (liga-te com: ssh root2@&lt;device&gt;)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Chave pública : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Chave pública : (nenhuma — apenas início de sessão por palavra-passe)</value></data>
   <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Atualização : (bloqueada — servidores de atualização Legrand mapeados para 127.0.0.1)</value></data>

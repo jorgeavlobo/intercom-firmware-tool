@@ -1769,6 +1769,9 @@ namespace IntercomFirmwareTool.App
             sb.AppendLine(L("Result_Build_Head"));
             sb.AppendLine(LF("Fmt_Result_Build_Input", fwz));
             sb.AppendLine(opts.HasPassword ? L("Result_Build_RootPw_Set") : L("Result_Build_RootPw_Disabled"));
+            // Name the login account the build creates (root2 — the factory root is left intact), so the
+            // password path says who to log in as, not only the key path's message (#193).
+            sb.AppendLine(L("Result_Build_LoginUser"));
             sb.AppendLine(opts.HasKey ? LF("Fmt_Result_Build_PubKey", keyPath) : L("Result_Build_PubKey_None"));
             if (opts.BlockFirmwareUpdates)
                 sb.AppendLine(L("Result_Build_BlockUpdates_On"));

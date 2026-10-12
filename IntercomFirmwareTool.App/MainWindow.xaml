@@ -731,10 +731,11 @@
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>   <!-- 0: firmware -->
-                <RowDefinition Height="Auto"/>   <!-- 1: password -->
-                <RowDefinition Height="Auto"/>   <!-- 2: confirm -->
-                <RowDefinition Height="Auto"/>   <!-- 3: credential rule -->
-                <RowDefinition Height="Auto"/>   <!-- 4: output -->
+                <RowDefinition Height="Auto"/>   <!-- 1: SSH login user (read-only) -->
+                <RowDefinition Height="Auto"/>   <!-- 2: password -->
+                <RowDefinition Height="Auto"/>   <!-- 3: confirm -->
+                <RowDefinition Height="Auto"/>   <!-- 4: credential rule -->
+                <RowDefinition Height="Auto"/>   <!-- 5: output -->
             </Grid.RowDefinitions>
 
             <!-- Firmware .fwz — the box, the "download official firmware" link, and
@@ -862,6 +863,30 @@
                     AutomationProperties.Name="{loc:Loc Tip_ClearFirmware}"
                     Click="BtnClearFwz_Click"/>
 
+            <!-- SSH login user. The build creates a NEW superuser account (root2, uid 0) and
+                 never touches the factory root; this read-only field makes the login name
+                 visible so the password flow — not just the generate-key message — says who to
+                 connect as. Editing the name is a separate, opt-in feature (#194); here it is
+                 fixed. Greyed read-only TextBox, value kept verbatim (a technical token). #193 -->
+            <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       Text="{loc:Loc Field_User}"/>
+            <!-- A 2-column Grid, not a horizontal StackPanel: a StackPanel measures its children with
+                 unbounded width, so the hint's TextWrapping never triggers and a long localized hint
+                 clips at a narrow window width (horizontal scrolling is disabled). The "*" column gives
+                 the hint finite width so it wraps. -->
+            <Grid Grid.Row="1" Grid.Column="1" Margin="0,0,0,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="TxtUser" Grid.Column="0" Width="170" Style="{StaticResource InputField}"
+                         IsReadOnly="True" Foreground="Gray" FontFamily="Consolas" Text="root2"
+                         ToolTip="{loc:Loc Tip_User}"
+                         AutomationProperties.Name="{loc:Loc Field_User}"/>
+                <TextBlock Grid.Column="1" VerticalAlignment="Center" Margin="10,0,0,0" Foreground="Gray"
+                           FontSize="11" TextWrapping="Wrap" Text="{loc:Loc Hint_User}"/>
+            </Grid>
+
             <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
                  the password or the key is required; ticking Disable turns password
                  login off, so a key becomes the credential. -->
@@ -869,9 +894,9 @@
                  simple view, "Root Password:" in Advanced — and re-localized on a
                  language switch. No {loc:Loc} binding here, so the imperative value is
                  the single source of truth (a binding + imperative set would fight). -->
-            <TextBlock Grid.Row="1" Grid.Column="0" x:Name="LblPassword"
+            <TextBlock Grid.Row="2" Grid.Column="0" x:Name="LblPassword"
                        Style="{StaticResource FieldLabel}"/>
-            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <Grid Width="170">
                     <TextBox x:Name="TxtPassword" Style="{StaticResource InputField}"
                              FontFamily="Consolas"/>
@@ -901,9 +926,9 @@
             </StackPanel>
 
             <!-- Confirm password -->
-            <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
+            <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="{loc:Loc Field_ConfirmPassword}"/>
-            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <Grid Width="170">
                     <TextBox x:Name="TxtConfirm" Style="{StaticResource InputField}"
                              FontFamily="Consolas"/>
@@ -921,21 +946,21 @@
                  required in the default (password-login) mode; ticking "Disable" turns
                  password login off and makes the SSH key (in Advanced) the required
                  credential instead. -->
-            <TextBlock Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+            <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
                        x:Name="LblCredentialRule"
                        Foreground="Gray" FontSize="11" TextWrapping="Wrap"/>
                        <!-- Text set in code (UpdateAdvancedVisibility): simple / advanced /
                             key-only wording, re-localized on a language switch. -->
 
             <!-- Output (disabled until a firmware is chosen) -->
-            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
+            <TextBlock Grid.Row="5" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
                        Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_SaveOutput}"/>
-            <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtOutputPath"
+            <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtOutputPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
                      Cursor="Hand" ToolTip="{loc:Loc Tip_Output}"
                      PreviewMouseLeftButtonDown="TxtOutputPath_MouseDown" PreviewKeyDown="TxtOutputPath_PreviewKeyDown"
                      Foreground="Gray"/>
-            <Button Grid.Row="4" Grid.Column="2" x:Name="BtnClearOutput"
+            <Button Grid.Row="5" Grid.Column="2" x:Name="BtnClearOutput"
                     Style="{StaticResource RowIconButton}" IsEnabled="False"
                     Content="&#xE711;" ToolTip="{loc:Loc Tip_ClearOutput}"
                     AutomationProperties.Name="{loc:Loc Tip_ClearOutput}"
