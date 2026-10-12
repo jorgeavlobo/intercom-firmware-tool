@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
@@ -59,15 +60,26 @@ namespace IntercomFirmwareTool.Core
             XElement root = doc.Root
                 ?? throw new InvalidDataException("fwz.xml has no root element.");
 
-            XElement? existing = root.Element(ReqHwVerElement);
-            if (existing is not null)
+            // Inspect ALL req_hw_ver children, not just the first: XContainer.Element returns only the
+            // first match, so a manifest that declared the element twice with different values could pass
+            // as "already correct" by matching the first while a conflicting second one stayed in place
+            // (and ReadReqHwVer, also reading the first, would not see the conflict).
+            var existing = root.Elements(ReqHwVerElement).ToList();
+            if (existing.Count > 1)
+                throw new InvalidDataException(
+                    $"fwz.xml declares req_hw_ver {existing.Count} times; refusing to rewrite a manifest " +
+                    "with duplicate (possibly conflicting) hardware requirements.");
+
+            if (existing.Count == 1)
             {
-                string current = (existing.Value ?? string.Empty).Trim();
+                string current = (existing[0].Value ?? string.Empty).Trim();
                 if (!string.Equals(current, reqHwVer, StringComparison.Ordinal))
                     throw new InvalidDataException(
                         $"fwz.xml already declares req_hw_ver '{current}'; expected it absent or '{reqHwVer}'. " +
                         "Refusing to override a declared hardware requirement.");
-                // Already the wanted value: fall through and re-serialize deterministically.
+                // Already the wanted value — normalize to the exact validated form so the serialized
+                // bytes and ReadReqHwVer agree (e.g. drop stray surrounding whitespace that Trim ignored).
+                existing[0].Value = reqHwVer;
             }
             else
             {

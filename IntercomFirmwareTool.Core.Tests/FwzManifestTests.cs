@@ -52,6 +52,29 @@ public class FwzManifestTests
     }
 
     [Fact]
+    public void Refuses_a_manifest_that_declares_req_hw_ver_more_than_once()
+    {
+        // XContainer.Element returns only the first match; a manifest with two differing declarations
+        // must be rejected, never silently left with a conflicting one in place.
+        byte[] dup = Encoding.UTF8.GetBytes(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
+            "<fwz><req_hw_ver>02.00.00</req_hw_ver><req_hw_ver>03.00.00</req_hw_ver></fwz>");
+        Assert.Throws<InvalidDataException>(() => FwzManifest.InjectReqHwVer(dup, "02.00.00"));
+    }
+
+    [Fact]
+    public void Normalizes_a_present_value_that_has_surrounding_whitespace()
+    {
+        // A present " 02.00.00 " matches after Trim, but the serialized bytes must be the exact
+        // validated form so ReadReqHwVer and the output agree.
+        byte[] padded = Encoding.UTF8.GetBytes(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?><fwz><req_hw_ver> 02.00.00 </req_hw_ver></fwz>");
+        byte[] outBytes = FwzManifest.InjectReqHwVer(padded, "02.00.00");
+        Assert.Equal("02.00.00", FwzManifest.ReadReqHwVer(outBytes));
+        Assert.Contains("<req_hw_ver>02.00.00</req_hw_ver>", Encoding.UTF8.GetString(outBytes));
+    }
+
+    [Fact]
     public void Refuses_to_override_a_different_declared_value()
     {
         // Never silently change a declared hardware requirement — the source for the fixed case has none.
