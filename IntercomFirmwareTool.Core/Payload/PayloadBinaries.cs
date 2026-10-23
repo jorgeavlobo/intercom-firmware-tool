@@ -72,12 +72,12 @@ namespace IntercomFirmwareTool.Core
         public static readonly ArmBinary Btmqttd = new(
             Name: "btmqttd",
             InstallPath: "/usr/sbin/btmqttd",
-            Length: 1_785_152,
-            Sha256Hex: "577f3dde6e1a55bcab1fffe7e5c0246131393e0a8400e566042770aa76f6de45",
+            Length: 1_939_376,
+            Sha256Hex: "5021a8c0e6702e81c892f2c3adc7d1e8d3d39e59252015df70b0bd1d581793b8",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.btmqttd",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.licenses.btmqttd-THIRD-PARTY-LICENSES.txt",
-            // The static binary bundles ~65 Rust crates; the mandatory notices span
+            // The static binary bundles 70 Rust crates; the mandatory notices span
             // MIT, Apache-2.0, ISC (ring/webpki/untrusted), BSD-3-Clause (subtle) and
             // Unicode-3.0 (unicode-ident). All texts are in the aggregated notice file.
             LicenseSpdx: "MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0")
