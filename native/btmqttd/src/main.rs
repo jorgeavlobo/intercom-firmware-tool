@@ -332,6 +332,11 @@ fn idle_snapshot_is_current_in(dir: &std::path::Path) -> bool {
 /// Returns `Ok(true)` when the caller should RE-EXEC the daemon immediately (a WHERE was just
 /// learned), or `Ok(false)` for an ordinary signal-driven shutdown.
 async fn run() -> Result<bool, String> {
+    // Before any handshake. rumqttc's TLS path calls `ClientConfig::builder()`, which
+    // panics on rustls 0.23 unless a process-wide provider is installed. Ring, not
+    // aws-lc: same backend as the direct HTTPS update check, and the one C dependency
+    // the reproducible ARM build already compiles.
+    update::install_ring_provider();
     let cfg = Arc::new(Config::load()?);
     if cfg.mqtt_host.is_empty() {
         return Err("MQTT_HOST is not set in the config".into());

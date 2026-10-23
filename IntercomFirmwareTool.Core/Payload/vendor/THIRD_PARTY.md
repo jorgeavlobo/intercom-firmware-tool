@@ -33,7 +33,7 @@ documented in the `ffmpeg` and `go2rtc` sections below.)
 interpreter, no shared libraries, and none of the device tools the shell bridge
 depended on (`tcpdump`, `python`, `jq`, `nc`, `awk`, `mosquitto_pub`/`sub`). (The
 installed *bridge* still uses `pgrep` — but in `bt_service_watchdog`, to
-launch/respawn the daemon, not in `btmqttd` itself.) It bundles ~65
+launch/respawn the daemon, not in `btmqttd` itself.) It bundles 70
 Rust crates, **all under permissive licenses** — MIT, Apache-2.0, ISC,
 BSD-3-Clause and Unicode-3.0 — with **no copyleft**. The aggregated dependency
 license texts and per-crate copyright notices travel with the binary in
@@ -44,15 +44,15 @@ license texts and per-crate copyright notices travel with the binary in
 | Field | `btmqttd` |
 |---|---|
 | File | `armhf/btmqttd` |
-| Size | 1,785,152 bytes |
-| SHA-256 | `577f3dde6e1a55bcab1fffe7e5c0246131393e0a8400e566042770aa76f6de45` |
+| Size | 1,939,376 bytes |
+| SHA-256 | `5021a8c0e6702e81c892f2c3adc7d1e8d3d39e59252015df70b0bd1d581793b8` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7 (`Tag_CPU_arch: v7`), **hard-float** (`Tag_FP_arch: VFPv3-D16`, `Tag_ABI_VFP_args: VFP registers`; ELF flags `0x5000400`) |
 | Build ID | none (stripped; `rust-lld` emits no GNU build-id note) |
 | Target triple | `armv7-unknown-linux-musleabihf` (armv7 hardfloat), **static musl** — no dependency on the device glibc 2.27 |
 | Build toolchain | `rustc 1.94.1` + `arm-linux-gnueabihf-gcc` (for `ring`'s C/asm); `cargo build --release` per `BUILD.md` |
 | Upstream version | `btmqttd` 0.1.0 (this repo, `native/btmqttd/`) |
-| Statically bundles | ~65 Rust crates (MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — all permissive) + musl libc (MIT) |
+| Statically bundles | 70 Rust crates (MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — all permissive) + musl libc (MIT) |
 | License | permissive only — see SPDX below |
 | SPDX expression | `MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0` |
 | License texts | [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../../../licenses/btmqttd-THIRD-PARTY-LICENSES.txt) |

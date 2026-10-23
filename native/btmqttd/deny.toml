@@ -11,20 +11,19 @@
 # RUSTSEC-2025-0134 failed the job until it was added to `ignore` — i.e. unmaintained is an
 # error here, unlike cargo-deny's old v1 schema where it defaulted to a warning.)
 yanked = "deny"
-# Documented, tracked exceptions (VEX-style). Every entry below is in the TLS stack that
-# rumqttc 0.24 pulls transitively, and there is NO fix reachable today: the latest rumqttc
-# (0.25.1) still pins rustls-webpki 0.102.8 and rustls-pemfile 2.2.0. Each is accepted with
-# a per-advisory justification and tracked in #81 for removal the moment a compatible
-# upgrade exists. btmqttd is a TLS *client* validating a single endpoint (the user's own
-# MQTT broker) and does not use CRLs, so the real-world exposure is low. Keeping these
-# scoped exceptions (rather than a red-forever gate) lets cargo-deny keep catching new,
-# fixable issues. See #81 before adding or removing entries here.
+# Documented, tracked exceptions (VEX-style). The three advisories that failed
+# master (via rumqttc 0.24 → tokio-rustls 0.25 → rustls 0.22.4 / rustls-webpki
+# 0.102.8) are cleared by the versions in Cargo.lock, not by this list:
+#   RUSTSEC-2026-0382  rustls-webpki 0.102.8 emSign intermediates; fixed >=0.103.16
+#   RUSTSEC-2026-0349  rustls 0.22.4 key-share downgrade (PR 3355); fixed >=0.23.46
+#   RUSTSEC-2026-0346  rustls 0.22.4 Debug impls leak session secrets; fixed >=0.23.46
+# The earlier webpki 0.102 ids (RUSTSEC-2026-0049, -0098, -0099, -0104) left with
+# them. Do not re-add any of those ids. The one remaining acceptance is
+# rustls-pemfile, which rumqttc 0.25.1 still uses to parse PEM and for which no
+# patched release exists. btmqttd does not call it directly. See #81 before
+# adding or removing entries.
 ignore = [
-  { id = "RUSTSEC-2026-0049", reason = "rustls-webpki CRL distributionPoint matching; btmqttd does not use CRLs and exploit needs a compromised issuing CA. No fix reachable via rumqttc. Tracked in #81." },
-  { id = "RUSTSEC-2026-0098", reason = "rustls-webpki URI name-constraint accepted; reachable only after signature verification and requires cert misissuance; btmqttd validates only its own broker. No fix reachable. Tracked in #81." },
-  { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard name-constraint; same class as 0098 (post-verify, misissuance-gated). No fix reachable. Tracked in #81." },
-  { id = "RUSTSEC-2026-0104", reason = "rustls-webpki panic parsing CRLs; btmqttd does not use CRLs, so unreachable. No fix reachable. Tracked in #81." },
-  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained (not a vulnerability): no patched release exists; RustSec recommends migrating to rustls-pki-types::pem::PemObject, but the crate is pulled transitively by rumqttc, so that awaits the rumqttc/rustls bump. Tracked in #81." },
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained (not a vulnerability): no patched release exists; RustSec recommends rustls-pki-types::pem::PemObject, but rumqttc 0.25.1 still parses PEM with this crate. btmqttd does not call it directly. Tracked in #81." },
 ]
 
 [licenses]

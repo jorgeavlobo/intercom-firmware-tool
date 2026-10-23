@@ -314,14 +314,33 @@ fn parse_http_response(raw: &[u8]) -> Result<String, String> {
     String::from_utf8(body.to_vec()).map_err(|_| "non-UTF-8 response body".to_string())
 }
 
+/// rustls 0.23 has no built-in crypto backend. rumqttc builds the broker
+/// `ClientConfig` with `ClientConfig::builder()`, which reads the process-wide
+/// default provider — install ring (the backend this HTTPS check also selects
+/// explicitly) before either handshake. A second call is a no-op.
+pub(crate) fn install_ring_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// A rustls TLS connector trusting the device's native root store. Built per check (a daily
 /// call — no need to cache), using the ring provider rumqttc already links.
 fn tls_connector() -> Result<tokio_rustls::TlsConnector, String> {
+    install_ring_provider();
     let mut roots = rustls::RootCertStore::empty();
-    let native = rustls_native_certs::load_native_certs()
-        .map_err(|e| format!("loading native root certificates: {e}"))?;
-    for cert in native {
-        // Ignore a single malformed anchor rather than failing the whole store.
+    // 0.8 returns partial success: a bad anchor is reported in `errors` and omitted from
+    // `certs`, instead of failing the whole load. Keep going when at least one anchor
+    // parsed; fail only when the store yielded nothing usable.
+    let native = rustls_native_certs::load_native_certs();
+    if native.certs.is_empty() {
+        let detail = if native.errors.is_empty() {
+            "no certificates returned".to_string()
+        } else {
+            native.errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; ")
+        };
+        return Err(format!("loading native root certificates: {detail}"));
+    }
+    for cert in native.certs {
+        // Ignore a single anchor the store refuses rather than failing the whole set.
         let _ = roots.add(cert);
     }
     if roots.is_empty() {
@@ -339,6 +358,17 @@ fn tls_connector() -> Result<tokio_rustls::TlsConnector, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_provider_is_the_process_default() {
+        // rumqttc 0.25 builds broker TLS with `ClientConfig::builder()`, which panics
+        // unless this process has a default provider. Empty roots are legal at build
+        // time; the handshake is what would reject them.
+        install_ring_provider();
+        let _config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+    }
 
     #[test]
     fn plausible_semver_accepts_real_versions() {
