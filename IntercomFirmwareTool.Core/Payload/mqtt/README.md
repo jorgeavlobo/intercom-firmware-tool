@@ -253,7 +253,7 @@ Everything else is generated or embedded elsewhere:
 
 ## Provenance & licensing
 
-`btmqttd` is our own code. Its ~65 bundled Rust crates are all permissive (MIT /
+`btmqttd` is our own code. Its 70 bundled Rust crates are all permissive (MIT /
 Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — **no copyleft**); the aggregated
 notices are in
 [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../../../licenses/btmqttd-THIRD-PARTY-LICENSES.txt),

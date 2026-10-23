@@ -17,19 +17,26 @@ path = "src/main.rs"
 tokio = { version = "1", default-features = false, features = [
     "rt", "macros", "net", "time", "io-util", "signal", "sync", "process", "fs",
 ] }
-# MQTT client. use-rustls pulls tokio-rustls -> rustls 0.22 -> ring for TLS; the
-# device broker is mosquitto v3.1 which accepts MQTT 3.1.1 (rumqttc's default).
-rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
+# MQTT 3.1.1 client. The device broker is mosquitto v3.1, which accepts 3.1.1 and
+# not v5, so this stays on rumqttc's v4 API (including the public `EventLoop::pending`
+# queue the disconnect purge filters). Published 0.25.1 still requires
+# rustls-webpki ^0.102.8; third_party/rumqttc is that release with the requirement
+# raised to 0.103.16 (RUSTSEC-2026-0382). rustls >=0.23.46 also clears
+# RUSTSEC-2026-0349 (key-share downgrade) and RUSTSEC-2026-0346 (Debug session
+# secrets). `use-rustls-no-provider` — not
+# `use-rustls` — so tokio-rustls's default aws-lc-rs backend is not enabled; ring
+# comes from the direct rustls / tokio-rustls features below.
+rumqttc = { path = "third_party/rumqttc", version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # HTTPS for the bridge update check (issue #114): a single GET of a small version manifest.
-# These crates are ALREADY in the tree via rumqttc's use-rustls (rustls 0.22 + ring), so
-# depending on them directly adds no new crate and no new license — it just exposes the API
-# for a hand-written GET. `rustls-native-certs` trusts the device's own root store (the same
-# anchors the firmware's curl uses), so no copyleft webpki-roots bundle is pulled (THIRD_PARTY.md).
-rustls = { version = "0.22", default-features = false, features = ["ring", "tls12", "logging"] }
-tokio-rustls = { version = "0.25", default-features = false, features = ["ring", "tls12", "logging"] }
-rustls-native-certs = "0.7"
+# These crates are the same rustls 0.23 + ring stack rumqttc links, so depending on them
+# directly adds no second TLS implementation. `rustls-native-certs` trusts the device's own
+# root store (the same anchors the firmware's curl uses), so no copyleft webpki-roots bundle
+# is pulled (THIRD_PARTY.md). The rustls floor is 0.23.46 (key-share downgrade fix).
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = "0.8"
 # Physical key reading (front panel) via the kernel evdev interface — pure Rust
 # (libc bindings, no C to compile), replacing the evtest+jq keypress.sh.
 evdev = { version = "0.12", features = ["tokio"] }

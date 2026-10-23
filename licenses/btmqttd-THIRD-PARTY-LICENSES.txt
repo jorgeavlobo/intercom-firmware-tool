@@ -26,7 +26,7 @@ Notes on license election
 * Three components carry obligations beyond the permissive MIT/Apache choice
   and are NOT dual-licensed away:
     - ring 0.17.14         is "Apache-2.0 AND ISC" (BOTH apply, mandatory).
-    - rustls-webpki 0.102.8 is ISC-only.
+    - rustls-webpki 0.103.16 is ISC-only.
     - untrusted 0.9.0      is ISC-only.
     - subtle 2.6.1         is BSD-3-Clause-only.
     - unicode-ident 1.0.24 is "(MIT OR Apache-2.0) AND Unicode-3.0"; the
@@ -38,7 +38,7 @@ Notes on license election
 COMPONENT INVENTORY
 ================================================================================
 
-The following 65 crates (plus the build-only crates noted) are bundled. Each
+The following 70 crates (plus the build-only crates noted) are bundled. Each
 row lists: crate name, version, declared SPDX expression, and the license we
 elect / must honor for that crate.
 
@@ -54,6 +54,7 @@ elect / must honor for that crate.
   errno                     0.3.14     MIT OR Apache-2.0                    MIT
   evdev                     0.12.2     Apache-2.0 OR MIT                    MIT
   find-msvc-tools           0.1.9      MIT OR Apache-2.0                    MIT
+  fixedbitset               0.5.7      MIT OR Apache-2.0                    MIT
   flume                     0.11.1     Apache-2.0/MIT                       MIT
   funty                     2.0.0      MIT                                  MIT
   futures-core              0.3.33     MIT OR Apache-2.0                    MIT
@@ -70,19 +71,20 @@ elect / must honor for that crate.
   mio                       1.2.2      MIT                                  MIT
   nix                       0.23.2     MIT                                  MIT
   num-conv                  0.2.2      MIT OR Apache-2.0                    MIT
-  openssl-probe             0.1.6      MIT/Apache-2.0                       MIT
+  once_cell                 1.21.4     MIT OR Apache-2.0                    MIT
+  openssl-probe             0.2.1      MIT OR Apache-2.0                    MIT
   pin-project-lite          0.2.17     Apache-2.0 OR MIT                    MIT
   powerfmt                  0.2.0      MIT OR Apache-2.0                    MIT
   proc-macro2               1.0.107    MIT OR Apache-2.0                    MIT
   quote                     1.0.47     MIT OR Apache-2.0                    MIT
   radium                    0.7.0      MIT                                  MIT
   ring                      0.17.14    Apache-2.0 AND ISC                   Apache-2.0 AND ISC
-  rumqttc                   0.24.0     Apache-2.0                           Apache-2.0
-  rustls                    0.22.4     Apache-2.0 OR ISC OR MIT             MIT
-  rustls-native-certs       0.7.3      Apache-2.0 OR ISC OR MIT             MIT
+  rumqttc                   0.25.1     Apache-2.0                           Apache-2.0
+  rustls                    0.23.46    Apache-2.0 OR ISC OR MIT             MIT
+  rustls-native-certs       0.8.5      Apache-2.0 OR ISC OR MIT             MIT
   rustls-pemfile            2.2.0      Apache-2.0 OR ISC OR MIT             MIT
   rustls-pki-types          1.15.0     MIT OR Apache-2.0                    MIT
-  rustls-webpki             0.102.8    ISC                                  ISC
+  rustls-webpki             0.103.16   ISC                                  ISC
   scopeguard                1.2.0      MIT OR Apache-2.0                    MIT
   serde                     1.0.229    MIT OR Apache-2.0                    MIT
   serde_core                1.0.229    MIT OR Apache-2.0                    MIT
@@ -97,12 +99,16 @@ elect / must honor for that crate.
   syn                       2.0.119    MIT OR Apache-2.0                    MIT
   syn                       3.0.2      MIT OR Apache-2.0                    MIT
   thiserror                 1.0.69     MIT OR Apache-2.0                    MIT
+  thiserror                 2.0.21     MIT OR Apache-2.0                    MIT
   thiserror-impl            1.0.69     MIT OR Apache-2.0                    MIT
+  thiserror-impl            2.0.21     MIT OR Apache-2.0                    MIT
   time                      0.3.54     MIT OR Apache-2.0                    MIT
   time-core                 0.1.9      MIT OR Apache-2.0                    MIT
   tokio                     1.53.1     MIT                                  MIT
   tokio-macros              2.7.1      MIT                                  MIT
-  tokio-rustls              0.25.0     MIT/Apache-2.0                       MIT
+  tokio-rustls              0.26.6     MIT OR Apache-2.0                    MIT
+  tokio-stream              0.1.19     MIT                                  MIT
+  tokio-util                0.7.20     MIT                                  MIT
   unicode-ident             1.0.24     (MIT OR Apache-2.0) AND Unicode-3.0  MIT AND Unicode-3.0
   untrusted                 0.9.0      ISC                                  ISC
   wyz                       0.5.1      MIT                                  MIT
@@ -136,6 +142,8 @@ MIT-elected components:
   errno 0.3.14               Copyright (c) 2014 Chris Wong
   evdev 0.12.2               Copyright (c) Corey Richardson [from Cargo.toml]
   find-msvc-tools 0.1.9      Copyright (c) 2014 Alex Crichton
+  fixedbitset 0.5.7          Copyright (c) 2015-2017 (LICENSE-MIT names no
+                             holder; Cargo.toml author: bluss)
   flume 0.11.1               Copyright (c) Joshua Barretto [from Cargo.toml]
   funty 2.0.0                Copyright (c) 2020 myrrlyn (Alexander Payne)
   futures-core 0.3.33        Copyright (c) 2016 Alex Crichton
@@ -155,7 +163,8 @@ MIT-elected components:
                              contributors
   nix 0.23.2                 Copyright (c) 2015 Carl Lerche + nix-rust Authors
   num-conv 0.2.2             Copyright (c) Jacob Pratt
-  openssl-probe 0.1.6        Copyright (c) 2014 Alex Crichton
+  once_cell 1.21.4           Copyright (c) Aleksey Kladov [from Cargo.toml]
+  openssl-probe 0.2.1        Copyright (c) 2014 Alex Crichton
   pin-project-lite 0.2.17    Copyright (c) 2018 Taiki Endo (MIT template ships
                              without an embedded copyright line; author not
                              declared in Cargo.toml) -- APPROXIMATED
@@ -164,9 +173,9 @@ MIT-elected components:
                              [from Cargo.toml]
   quote 1.0.47               Copyright (c) David Tolnay [from Cargo.toml]
   radium 0.7.0               Copyright (c) 2019 kneecaw (Nika Layzell)
-  rustls 0.22.4              Copyright (c) 2016 Joseph Birr-Pixton
+  rustls 0.23.46             Copyright (c) 2016 Joseph Birr-Pixton
                              <jpixton@gmail.com>
-  rustls-native-certs 0.7.3  Copyright (c) 2016 Joseph Birr-Pixton
+  rustls-native-certs 0.8.5  Copyright (c) 2016 Joseph Birr-Pixton
                              <jpixton@gmail.com>
   rustls-pemfile 2.2.0       Copyright (c) 2016 Joseph Birr-Pixton
                              <jpixton@gmail.com>
@@ -191,12 +200,16 @@ MIT-elected components:
   syn 3.0.2                  Copyright (c) David Tolnay [from Cargo.toml]
   tap 1.0.1                  Copyright (c) 2017 Elliot Linder <darfink@gmail.com>
   thiserror 1.0.69           Copyright (c) David Tolnay [from Cargo.toml]
+  thiserror 2.0.21           Copyright (c) David Tolnay [from Cargo.toml]
   thiserror-impl 1.0.69      Copyright (c) David Tolnay [from Cargo.toml]
+  thiserror-impl 2.0.21      Copyright (c) David Tolnay [from Cargo.toml]
   time 0.3.54                Copyright (c) Jacob Pratt et al.
   time-core 0.1.9            Copyright (c) Jacob Pratt et al.
   tokio 1.53.1               Copyright (c) Tokio Contributors
   tokio-macros 2.7.1         Copyright (c) Tokio Contributors
-  tokio-rustls 0.25.0        Copyright (c) 2017 quininer kel
+  tokio-rustls 0.26.6        Copyright (c) 2017 quininer kel
+  tokio-stream 0.1.19        Copyright (c) Tokio Contributors
+  tokio-util 0.7.20          Copyright (c) Tokio Contributors
   unicode-ident 1.0.24       Copyright (c) David Tolnay [from Cargo.toml]
                              (see also Unicode-3.0 notice below)
   wyz 0.5.1                  Copyright (c) 2018 myrrlyn (Alexander Payne)
@@ -207,13 +220,13 @@ MIT-elected components:
 Apache-2.0-elected / required components:
 
   ring 0.17.14               (Apache-2.0 AND ISC) -- see verbatim notices below
-  rumqttc 0.24.0             Copyright (c) tekjar <raviteja@bytebeam.io> /
+  rumqttc 0.25.1             Copyright (c) tekjar <raviteja@bytebeam.io> /
                              Bytebeam (Apache-2.0)
 
 ISC-only components:
 
   ring 0.17.14 (ISC part)    Copyright 2015-2025 Brian Smith.
-  rustls-webpki 0.102.8      Copyright 2015 Brian Smith.
+  rustls-webpki 0.103.16     Copyright 2015 Brian Smith.
   untrusted 0.9.0            Copyright 2015-2016 Brian Smith.
 
 BSD-3-Clause component:
@@ -265,7 +278,7 @@ component:
 2. Apache License, Version 2.0
 --------------------------------------------------------------------------------
 
-Applies to ring 0.17.14 (in conjunction with the ISC terms) and rumqttc 0.24.0.
+Applies to ring 0.17.14 (in conjunction with the ISC terms) and rumqttc 0.25.1.
 It is also one of the offered options for many of the dual-licensed components
 listed above (for those we elect MIT, but the full Apache-2.0 text is provided
 here for completeness).
@@ -478,12 +491,12 @@ here for completeness).
 --------------------------------------------------------------------------------
 
 Applies to ring 0.17.14 (ISC portion, in addition to Apache-2.0),
-rustls-webpki 0.102.8, and untrusted 0.9.0. The applicable copyright lines are:
+rustls-webpki 0.103.16, and untrusted 0.9.0. The applicable copyright lines are:
 
     ring 0.17.14 (ISC-licensed code):
         Copyright 2015-2025 Brian Smith.
 
-    rustls-webpki 0.102.8:
+    rustls-webpki 0.103.16:
         Copyright 2015 Brian Smith.
 
     untrusted 0.9.0:
@@ -506,7 +519,7 @@ The ISC permission text (identical for the above) is:
 Note on ring: ring additionally incorporates code sourced from BoringSSL under
 the Apache License 2.0 (see section 2 above) and other files under the ISC
 license; per-file license information is retained at the top of each source
-file in the ring distribution. The rustls 0.22.4 crate, which we elect to use
+file in the ring distribution. The rustls 0.23.46 crate, which we elect to use
 under the MIT License, is also offered under this ISC license with the
 copyright line "Copyright (c) 2016, Joseph Birr-Pixton <jpixton@gmail.com>".
 
